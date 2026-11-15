@@ -537,7 +537,7 @@ fi
 # ── Periodic daemon.log rotation ────────────────────────────────────
 # Truncate in place: never replace the inode held open by the daemon.
 
-gosu "$PUID:$PGID" sh -c '
+gosu $PUID:$PGID sh -c '
     while true; do
         sleep 3600
 

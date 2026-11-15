@@ -290,34 +290,6 @@ Images are published automatically to:
 ghcr.io/mx10-ac2n/simplex-bridge
 ```
 
-### Main Branch
-
-Every successful push to `main` publishes:
-
-- `latest`
-- `sha-<commit>`
-
-### Version Tags
-
-Push a version tag:
-
-```bash
-git tag v1.3.2
-git push origin v1.3.2
-```
-
-The workflow publishes version-specific images.
-
-### GitHub Permissions
-
-Go to:
-
-Settings → Actions → General → Workflow permissions
-
-Ensure workflows have permission to read and write packages.
-
-The workflow uses `GITHUB_TOKEN`; no Docker Hub credentials are required.
-
 ## License
 
 The project source is licensed under GPL-3.0.

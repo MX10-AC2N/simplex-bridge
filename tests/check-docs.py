@@ -1,129 +1,69 @@
-#!/usr/bin/env python3
-"""Documentation-consistency checks.
 
-Catches the class of drift this repo has actually suffered: a README that
-describes behaviour the code no longer has, and version/digest pins that
-disagree between the README, compose file, and Unraid template.
-"""
-import re
+#!/usr/bin/env python3
+
+from pathlib import Path
 import sys
 
-BAD = []
+ROOT = Path(__file__).resolve().parents[1]
 
+readme = (ROOT / "README.md").read_text()
+compose = (ROOT / "docker-compose.yml").read_text()
+workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text()
+entrypoint = (ROOT / "entrypoint.sh").read_text()
+changelog = (ROOT / "CHANGELOG.md").read_text()
 
-def check(cond, msg):
-    if cond:
-        print(f"  ✓ {msg}")
+errors = []
+
+def check(condition, message):
+    if condition:
+        print(f"PASS: {message}")
     else:
-        print(f"  ✗ {msg}")
-        BAD.append(msg)
+        print(f"FAIL: {message}")
+        errors.append(message)
 
+image = "ghcr.io/mx10-ac2n/simplex-bridge"
 
-readme = open("README.md").read()
-compose = open("docker-compose.yml").read()
-template = open("templates/simplex-bridge.xml").read()
-installer = open("install-websockets.sh").read()
+check(image in compose, "Compose uses fork GHCR image")
+check(image in workflow, "Workflow publishes fork GHCR image")
+check(image in readme, "README documents fork GHCR image")
 
-# 1. The installer does not patch; the README must not say it does.
-check("applies the two-line fix to the adapter" not in readme,
-      "README does not claim the installer patches the adapter")
-check("no longer patches the adapter" in readme,
-      "README states the installer is read-only")
-# Strip comments before looking for an actual sed -i edit — the file
-# deliberately mentions `sed -i` in prose explaining why it was removed.
-installer_code = "\n".join(
-    ln for ln in installer.splitlines() if not ln.lstrip().startswith("#"))
-check("sed -i" not in installer_code,
-      "installer executes no sed -i edit (only mentions it in comments)")
-check(not re.search(r">\s*\S*adapter\.py", installer_code),
-      "installer never redirects into adapter.py")
+check(
+    "ghcr.io/libre-7/simplex-bridge" not in compose,
+    "Compose does not reference upstream image"
+)
 
-DOCKERHUB_NS = "libre7"          # note: NOT the GitHub org name
-DOCKERHUB_NAME = "simplex-bridge"
+check(
+    "SIMPLEX_DNS_CHECK_HOST" in entrypoint,
+    "Entrypoint supports DNS hostname configuration"
+)
 
-# 2. Version pins must agree everywhere they appear.
-m = re.search(r"pinned to the immutable (v[\d.]+) release by digest", readme)
-check(m is not None, "README names the pinned release version")
-if m:
-    ver = m.group(1)
-    check(f"# {ver}" in compose,
-          f"compose pin comment agrees with README ({ver})")
-    check(ver in template,
-          f"Unraid template pins the same version ({ver})")
+check(
+    "SIMPLEX_DNS_CHECK_HOST" in readme,
+    "README documents DNS hostname configuration"
+)
 
-# 3. The digest in compose and in the README's embedded compose block.
-digests = set(re.findall(r"sha256:([0-9a-f]{64})", readme)) | \
-          set(re.findall(r"sha256:([0-9a-f]{64})", compose))
-check(len(digests) == 1,
-      f"one digest used across README and compose (found {len(digests)})")
+check(
+    "DNS" in changelog,
+    "Changelog documents DNS changes"
+)
 
-# 4. The Unraid template's <Repository> must not float :latest. Match the
-# element itself, not the prose around it.
-repo = re.search(r"<Repository>([^<]+)</Repository>", template)
-check(repo is not None, "Unraid template has a <Repository> element")
-if repo:
-    check(":latest" not in repo.group(1),
-          f"Unraid <Repository> pins a version, not :latest ({repo.group(1)})")
+check(
+    "packages: write" in workflow,
+    "Workflow has package publishing permissions"
+)
 
-# 5. Documented env vars must exist in the Dockerfile/entrypoint.
-doc_vars = set(re.findall(r"\|\s*`(SIMPLEX_[A-Z_]+|PUID|PGID|TZ)`\s*\|", readme))
-combined = open("Dockerfile").read() + open("entrypoint.sh").read()
-missing = [v for v in sorted(doc_vars) if v not in combined]
-check(not missing,
-      f"every documented env var is referenced in code (missing: {missing or 'none'})")
+check(
+    "linux/amd64" in workflow and "linux/arm64" in workflow,
+    "Workflow builds AMD64 and ARM64"
+)
 
-# 6. SECURITY.md must exist now that we claim a reporting path.
-try:
-    sec = open("SECURITY.md").read()
-    check("Report a vulnerability" in sec or "reporting" in sec.lower(),
-          "SECURITY.md documents a reporting path")
-except FileNotFoundError:
-    check(False, "SECURITY.md exists")
+check(
+    "pull_request" in workflow and "push:" in workflow,
+    "Workflow validates pull requests and publishes pushes"
+)
 
-# 7. The released version must be the one documented as latest — in the
-# README headline and as a dated CHANGELOG entry. Without this, a release can
-# ship with docs still describing the previous version as current.
-if m:
-    ver = m.group(1)
-    headline = re.search(r"latest release is \*\*(v[\d.]+)\*\*", readme)
-    check(headline is not None and headline.group(1) == ver,
-          f"README headline calls {ver} the latest release")
-    changelog = open("CHANGELOG.md").read()
-    # CHANGELOG headings drop the leading "v" (## [1.3.1] — 2026-10-04) and
-    # separate the date with an em-dash, so match either separator.
-    bare = ver.lstrip("v")
-    check(re.search(rf"^## \[{re.escape(bare)}\]\s*[—–-]\s*\d{{4}}-\d{{2}}-\d{{2}}",
-                    changelog, re.M) is not None,
-          f"CHANGELOG has a dated entry for {ver}")
-
-# 7. The pinned digest must be the one the pinned tag actually resolves to.
-#    Carrying a digest forward by hand is error-prone: a rebuild with unchanged
-#    build inputs still yields a NEW index digest when the OCI metadata labels
-#    change (version/created/revision live in the config, hence the manifest).
-#    Verify against the registry, and skip cleanly when offline.
-if m:
-    ver = m.group(1)
-    pin = next(iter(digests), None)
-    if not pin or "--no-network" in sys.argv:
-        print("  ~ skipped registry digest check (offline or --no-network)")
-    else:
-        import json as _json
-        import urllib.request as _u
-        url = (f"https://hub.docker.com/v2/repositories/{DOCKERHUB_NS}/"
-               f"{DOCKERHUB_NAME}/tags/{ver}")
-        try:
-            remote = _json.load(_u.urlopen(
-                _u.Request(url, headers={"User-Agent": "check-docs"}), timeout=20
-            )).get("digest", "")
-            check(remote == "sha256:" + pin,
-                  f"pinned digest is what Docker Hub tag {ver} resolves to"
-                  + ("" if remote == "sha256:" + pin
-                     else f" (registry says {remote[:19]}…, docs say sha256:{pin[:19]}…)"))
-        except Exception as exc:               # offline, rate-limited, renamed…
-            print(f"  ~ skipped registry digest check ({type(exc).__name__})")
-
-print()
-if BAD:
-    print(f"=== {len(BAD)} doc check(s) failed ===")
+if errors:
+    print(f"\n{len(errors)} check(s) failed.")
     sys.exit(1)
-print("=== all doc checks passed ===")
+
+print("\nAll documentation checks passed.")

@@ -87,8 +87,8 @@ RUN set -eux; \
       *) echo "no simplex-chat binary for arch '$arch'" >&2; exit 1 ;; \
     esac; \
     curl -fsSL -o /usr/local/bin/simplex-chat \
-      "https://github.com/simplex-chat/simplex-chat/releases/download/\( {SIMPLEX_VERSION}/ \){asset}"; \
-    echo "${sha}  /usr/local/bin/simplex-chat" | sha256sum -c -; \
+      "https://github.com/simplex-chat/simplex-chat/releases/download/${SIMPLEX_VERSION}/${asset}"; \
+    echo "${sha}  /usr/local/bin/simplex-chat" | sha256sum -c -; x
     chmod +x /usr/local/bin/simplex-chat && \
     simplex-chat --version
 

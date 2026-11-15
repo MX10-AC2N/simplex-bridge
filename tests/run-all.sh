@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 #
 # SimpleX Bridge - Complete regression test runner

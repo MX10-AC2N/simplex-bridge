@@ -168,6 +168,7 @@ rules.
 | `SIMPLEX_STARTUP_TIMEOUT` | 15 | WebSocket startup timeout |
 | `SIMPLEX_DNS_CHECK_HOST` | smp5.simplex.im | DNS preflight hostname |
 | `SIMPLEX_SOCAT_PORT` | unset | Optional socat listener port |
+| `SIMPLEX_BOT_COMMAND` | unset | Commandes bot au format SimpleX |
 | `PUID` | 99 | Daemon user ID |
 | `PGID` | 100 | Daemon group ID |
 | `TZ` | UTC | Container timezone |

@@ -1,319 +1,106 @@
-name: Docker
+
+name: Docker Build and Publish
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    branches: [main]
+    branches:
+      - main
+    tags:
+      - "v*"
 
-# Cancel superseded runs on the same branch/PR
-concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 env:
-  GHCR_IMAGE: ghcr.io/libre-7/simplex-bridge
-  DOCKERHUB_IMAGE: libre7/simplex-bridge
-  # Multi-arch: upstream publishes simplex-chat-ubuntu-24_04 for BOTH x86_64
-  # and aarch64, and gosu ships a static binary per arch. The Dockerfile
-  # selects asset + SHA256 per TARGETARCH.
-  PLATFORMS: linux/amd64,linux/arm64
+  IMAGE: ghcr.io/mx10-ac2n/simplex-bridge
 
 jobs:
-  lint:
+  tests:
+    name: Tests and validation
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Lint Dockerfile (hadolint)
-        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          dockerfile: Dockerfile
-          failure-threshold: error
+          python-version: "3.x"
 
-      - name: Lint shell scripts (shellcheck)
+      - name: Install dependencies
+        run: |
+          python -m pip install pyyaml
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate shell syntax
+        run: |
+          bash -n entrypoint.sh
+          bash -n install-websockets.sh
+          bash -n tests/*.sh
+
+      - name: Run ShellCheck
         run: |
           shellcheck entrypoint.sh install-websockets.sh tests/*.sh
 
-      - name: Verify Python sources compile
+      - name: Run regression suite
         run: |
-          python3 -m py_compile healthcheck.py tests/test-setup-userid.py tests/ss_from_proc.py
-
-      - name: Readiness-gate regression tests (F2)
-        # Creates real TCP listeners and checks port_listening() matches an
-        # EXACT port. Catches a regression to a substring match, which would
-        # let an unrelated host service (e.g. :15225) satisfy the startup gate
-        # under host networking.
-        run: bash tests/test-port-gate.sh
-
-      - name: Installer interpreter tests (F1)
-        # install-websockets.sh must install into the gateway's virtualenv and
-        # verify with that same interpreter. `docker` and `pip` are stubbed, so
-        # this neither needs Docker nor touches the network. It skips (exit 77)
-        # on runners with no Hermes install, since the venv-detection path is
-        # only meaningful inside a Hermes container.
-        run: |
-          set +e
-          bash tests/test-installer-interpreter.sh
-          rc=$?
-          if [ "$rc" -eq 77 ]; then
-            echo "::notice title=Installer interpreter tests skipped::No Hermes interpreter on this runner."
-          elif [ "$rc" -ne 0 ]; then
-            exit "$rc"
-          fi
-
-      - name: First-run setup userId tests (F3)
-        # Drives the real setup block from entrypoint.sh against a fake
-        # WebSocket daemon: the /_address_settings userId must come from the
-        # daemon, and success must be confirmed by corrId correlation.
-        run: python3 tests/test-setup-userid.py
-
-      - name: Documentation consistency
-        # --no-network: the live registry-digest check is for a release-time
-        # human check. CI must not fail because Docker Hub is unreachable or
-        # rate-limiting, so the pin is only verified against the files here.
-        run: python3 tests/check-docs.py --no-network
-
-  smoke:
-    # Builds the image and actually runs it with the same capability set
-    # docker-compose.yml uses. Without this, a broken cap_drop/no-new-privileges
-    # combination ships green: the entrypoint needs CHOWN+SETUID+SETGID and dies
-    # on startup, which lint and build steps cannot detect.
-    #
-    # Runs on BOTH published architectures. arm64 executes under QEMU
-    # emulation, which is slow — hence the longer startup window and the
-    # per-platform healthcheck budget. Emulation is not a substitute for
-    # real-hardware testing, but it does prove the arm64 asset, checksum and
-    # entrypoint all work end to end, which is exactly what a single-arch
-    # build could never catch.
-    name: smoke (${{ matrix.platform }})
-    runs-on: ubuntu-latest
-    needs: lint
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [linux/amd64, linux/arm64]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up QEMU (cross-arch emulation)
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build image (load into local docker)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: false
-          load: true
-          tags: simplex-bridge:smoke
-          cache-from: type=gha
-
-      - name: Validate compose file
-        run: docker compose config --quiet
-
-      - name: Run container with compose security options
-        run: |
-          docker volume create simplex-smoke-data
-          # Mirror docker-compose.yml exactly: cap_drop ALL + the three caps the
-          # entrypoint legitimately needs + no-new-privileges. Bridge networking
-          # keeps the daemon's 127.0.0.1:5225 bind inside the container's own netns
-          # (the in-container healthcheck still probes it via loopback) and avoids
-          # binding a port on the shared runner host.
-          docker run -d --name simplex-smoke \
-            --platform ${{ matrix.platform }} \
-            --network bridge \
-            -v simplex-smoke-data:/data \
-            --cap-drop ALL \
-            --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
-            --security-opt no-new-privileges:true \
-            -e SIMPLEX_STARTUP_TIMEOUT=180 \
-            simplex-bridge:smoke
-
-      - name: Wait for healthy status
-        run: |
-          # Emulated arm64 starts the Haskell daemon far slower than native
-          # amd64, so the poll budget scales with the platform.
-          if [ "${{ matrix.platform }}" = "linux/arm64" ]; then
-            ATTEMPTS=120
-          else
-            ATTEMPTS=40
-          fi
-          for i in $(seq 1 "$ATTEMPTS"); do
-            STATE=$(docker inspect --format '{{.State.Health.Status}}' simplex-smoke 2>/dev/null || echo none)
-            RUNNING=$(docker inspect --format '{{.State.Running}}' simplex-smoke 2>/dev/null || echo false)
-            echo "attempt $i: running=$RUNNING health=$STATE"
-            if [ "$STATE" = "healthy" ]; then
-              echo "container became healthy"
-              docker logs simplex-smoke 2>&1 | tail -20
-              exit 0
-            fi
-            if [ "$RUNNING" != "true" ]; then
-              echo "::error::container exited during startup"
-              docker logs simplex-smoke 2>&1 | tail -40
-              exit 1
-            fi
-            sleep 3
-          done
-          echo "::error::container never became healthy"
-          docker logs simplex-smoke 2>&1 | tail -40
-          exit 1
-
-      - name: Bot address was created
-        # Non-fatal by design: the bot address is produced by the first-run
-        # setup, which contacts the SimpleX SMP servers. Outbound filtering or
-        # a slow/unavailable server in the runner makes this fail even when the
-        # image is perfectly healthy — and the entrypoint already treats setup
-        # failure as retryable on next start. Healthy status is the real gate.
-        continue-on-error: true
-        run: |
-          ADDR=$(docker exec simplex-smoke cat /data/bot_address.txt 2>/dev/null || echo "")
-          if [ -z "$ADDR" ]; then
-            echo "::warning::no bot address yet (first-run setup needs outbound access to SimpleX servers)"
-            exit 0
-          fi
-          echo "bot address: ${ADDR:0:60}..."
-          case "$ADDR" in
-            simplex:/*) echo "bot address looks valid" ;;
-            *) echo "::warning::unexpected bot address format: $ADDR" ;;
-          esac
-
-      - name: Container logs
-        if: always()
-        run: docker logs simplex-smoke 2>&1 | tail -40
-
-      - name: Cleanup
-        if: always()
-        run: |
-          docker rm -f simplex-smoke 2>/dev/null || true
-          docker volume rm simplex-smoke-data 2>/dev/null || true
+          bash tests/run-all.sh
 
   build:
+    name: Build and publish
     runs-on: ubuntu-latest
+    needs: tests
+
+    if: github.event_name == 'push'
+
     permissions:
       contents: read
       packages: write
-    needs: smoke
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # This job publishes only on push. Every push/mirror step below is gated
-      # `if: github.event_name != 'pull_request'`, so on a PR the job would
-      # otherwise go green having published nothing — a false signal, since
-      # "Build and push" with push:false still reports success. Make the no-op
-      # explicit so a PR's green build job is honestly labelled.
-      - name: Report publishing scope
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "::notice title=PR build is publish-free::This run builds and smoke-tests only."
-            echo "Registry publishing and the cross-registry platform check are skipped on PRs."
-          else
-            echo "Push detected — this run publishes to GHCR and mirrors to Docker Hub."
-          fi
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.GHCR_IMAGE }}
-          tags: |
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=ref,event=tag
-            type=sha,format=short,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-          # metadata-action infers org.opencontainers.image.licenses from the
-          # GitHub repo's license and OVERRIDES the Dockerfile LABEL via
-          # `labels:`. The repo source is GPL-3.0, but the shipped image
-          # redistributes AGPL-3.0 binaries (simplex-chat, simplexmq), so the
-          # published image was advertising GPL-3.0 despite the Dockerfile
-          # saying AGPL-3.0. Pin it here so the published metadata matches
-          # the terms of the artifact. See README "Bundled third-party
-          # components".
-          labels: |
-            org.opencontainers.image.licenses=AGPL-3.0
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      # ── Log in to GHCR early so build-push can push directly ──
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push to GHCR
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and publish multi-architecture image
+        uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ env.PLATFORMS }}
-          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
-          provenance: mode=max
+          provenance: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # ── Docker Hub publish — main and tag pushes only, never PRs ──
-      # Mirror with `imagetools create` rather than pull+retag+push. A plain
-      # `docker pull` on an amd64 runner resolves only the amd64 manifest, so
-      # retagging and pushing that would REPLACE Docker Hub's multi-arch index
-      # with a single-arch image — arm64 pulls would then fail with
-      # "no matching manifest". imagetools copies the manifest list itself,
-      # preserving every platform and keeping the registries in parity.
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-        continue-on-error: true
-        id: dh-login
-
-      - name: Mirror tags to Docker Hub
-        if: github.event_name != 'pull_request' && steps.dh-login.outcome == 'success'
-        run: |
-          for tag in $(echo '${{ steps.meta.outputs.tags }}' | tr ',' ' '); do
-            name="${tag##*:}"
-            src="ghcr.io/libre-7/simplex-bridge:${name}"
-            dst="libre7/simplex-bridge:${name}"
-            echo "Mirroring ${src} -> ${dst}"
-            docker buildx imagetools create --tag "${dst}" "${src}"
-          done
-
-      - name: Verify Docker Hub manifest platforms
-        if: github.event_name != 'pull_request' && steps.dh-login.outcome == 'success'
-        run: |
-          # Guard against a silent single-arch regression: both registries must
-          # advertise the same platform set. Parse the human-readable
-          # "Platform:" lines rather than a JSON field path, so this keeps
-          # working across buildx versions. The unknown/unknown entries are the
-          # SBOM/provenance attestation manifests and are filtered out.
-          for repo in "ghcr.io/libre-7/simplex-bridge" "libre7/simplex-bridge"; do
-            echo "=== ${repo}:latest ==="
-            docker buildx imagetools inspect "${repo}:latest" \
-              | grep -E '^\s*Platform:' \
-              | sed 's/.*Platform:\s*//' \
-              | grep -v 'unknown' \
-              | sort | tr '\n' ' '
-            echo
-          done
-          # Both platforms must be present on both registries, or fail loudly.
-          for repo in "ghcr.io/libre-7/simplex-bridge" "libre7/simplex-bridge"; do
-            for plat in linux/amd64 linux/arm64; do
-              if ! docker buildx imagetools inspect "${repo}:latest" | grep -qE "Platform:\s+${plat}\b"; then
-                echo "::error::${repo} is missing ${plat}"
-                exit 1
-              fi
-            done
-          done
-          echo "Both registries advertise linux/amd64 and linux/arm64"

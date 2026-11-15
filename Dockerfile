@@ -63,13 +63,10 @@ RUN groupadd --system --gid 911 simplex && \
 
 VOLUME ["/data"]
 
-# Install simplex-chat CLI binary (static Haskell binary, ~80MB)
+# Install simplex-chat CLI binary (static Haskell binary)
 # Multi-arch: upstream publishes simplex-chat-ubuntu-24_04-{x86_64,aarch64}.
-# Each arch has its own SHA256 in the v7.0.2 release notes, so the checksum is
-# selected alongside the asset — never reuse one arch's digest for another.
-# Bump SIMPLEX_VERSION + both digests together; base-refresh.yml only tracks
-# the ubuntu digest, so this pin is maintained by hand.
-ARG SIMPLEX_VERSION=v7.0.2
+# Each arch has its own SHA256 in the v7.1.4 release notes.
+ARG SIMPLEX_VERSION=v7.1.4
 ARG TARGETARCH
 RUN set -eux; \
     arch="${TARGETARCH:-}"; \
@@ -83,14 +80,14 @@ RUN set -eux; \
     case "$arch" in \
       amd64) \
         asset="simplex-chat-ubuntu-24_04-x86_64"; \
-        sha="895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0" ;; \
+        sha="15a64d3fe75782900b3686aed0f635569b1f3526c47139ff30ac1ce1a50189ca" ;; \
       arm64) \
         asset="simplex-chat-ubuntu-24_04-aarch64"; \
-        sha="2d2e62351f11bc51ae659618584722b38ea5a6796b806c9a388ee6e3124c90ac" ;; \
+        sha="424d9b8c2e46abc221be190475c9d5a71c78b779791f722de1a25325a1b15e5f" ;; \
       *) echo "no simplex-chat binary for arch '$arch'" >&2; exit 1 ;; \
     esac; \
     curl -fsSL -o /usr/local/bin/simplex-chat \
-      "https://github.com/simplex-chat/simplex-chat/releases/download/${SIMPLEX_VERSION}/${asset}"; \
+      "https://github.com/simplex-chat/simplex-chat/releases/download/\( {SIMPLEX_VERSION}/ \){asset}"; \
     echo "${sha}  /usr/local/bin/simplex-chat" | sha256sum -c -; \
     chmod +x /usr/local/bin/simplex-chat && \
     simplex-chat --version

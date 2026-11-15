@@ -215,6 +215,13 @@ Only enable this feature on trusted networks.
 
 Do not expose the WebSocket API directly to the Internet.
 
+### Bot Commands
+
+Tu peux exposer un menu de commandes aux utilisateurs avec :
+
+```yaml
+SIMPLEX_BOT_COMMANDS: "'Help':/help,'Status':/status,'Info':/info"
+
 ## Hermes Agent Integration
 
 Configure Hermes Agent to connect to:

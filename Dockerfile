@@ -88,7 +88,7 @@ RUN set -eux; \
     esac; \
     curl -fsSL -o /usr/local/bin/simplex-chat \
       "https://github.com/simplex-chat/simplex-chat/releases/download/${SIMPLEX_VERSION}/${asset}"; \
-    echo "${sha}  /usr/local/bin/simplex-chat" | sha256sum -c -; x
+    echo "${sha}  /usr/local/bin/simplex-chat" | sha256sum -c -; \
     chmod +x /usr/local/bin/simplex-chat && \
     simplex-chat --version
 

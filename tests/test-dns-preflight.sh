@@ -13,12 +13,15 @@ pass() {
     echo "PASS: $*"
 }
 
+# shellcheck disable=SC2016
 grep -Fq 'chmod 0644 "$resolver_file"' "$ENTRYPOINT" ||
     fail "DNS resolver permissions fix missing"
 
+# shellcheck disable=SC2016
 grep -Fq 'gosu "$PUID:$PGID" test -r "$resolver_file"' "$ENTRYPOINT" ||
     fail "Resolver readability check missing"
 
+# shellcheck disable=SC2016
 grep -Fq 'gosu "$PUID:$PGID" getent ahostsv4 "$DNS_CHECK_HOST"' "$ENTRYPOINT" ||
     fail "DNS lookup is not performed as daemon user"
 

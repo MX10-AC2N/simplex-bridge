@@ -453,6 +453,43 @@ async def setup():
                         'auto-accept may not be active'
                     )
 
+        # Configure bot commands if provided
+        bot_commands = os.environ.get('SIMPLEX_BOT_COMMANDS', '').strip()
+        if bot_commands and user_id is not None:
+            # Escape properly for the CLI command
+            cmd = f'/set bot commands {bot_commands}'
+            await ws.send(json.dumps({
+                'corrId': 's4',
+                'cmd': cmd
+            }))
+
+            confirmed = False
+            try:
+                for _ in range(10):
+                    evt = await asyncio.wait_for(ws.recv(), timeout=1)
+                    try:
+                        response = json.loads(evt)
+                    except json.JSONDecodeError:
+                        continue
+                    if response.get('corrId') == 's4':
+                        # Accept either success or the updated profile response
+                        rtype = response.get('resp', {}).get('type')
+                        if rtype in ('userProfileUpdated', 'cmdOk', 'chatCmdError'):
+                            confirmed = True
+                            if rtype == 'chatCmdError':
+                                print('[setup] WARNING: bot commands may have failed: ' +
+                                      json.dumps(response.get('resp'), ensure_ascii=False))
+                            break
+            except asyncio.TimeoutError:
+                pass
+
+            if confirmed:
+                print(f'[setup] Bot commands configured: {bot_commands[:80]}...')
+            else:
+                print('[setup] WARNING: /set bot commands was not confirmed')
+        elif bot_commands and user_id is None:
+            print('[setup] WARNING: cannot set bot commands — userId unknown')
+
         # Save the contact address.
         if address:
             print(f'[setup] Bot address: {address[:80]}...')

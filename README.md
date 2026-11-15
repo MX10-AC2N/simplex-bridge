@@ -222,6 +222,10 @@ Tu peux exposer un menu de commandes aux utilisateurs avec :
 ```yaml
 SIMPLEX_BOT_COMMANDS: "'Help':/help,'Status':/status,'Info':/info"
 ```
+Syntaxe complète (menus imbriqués possibles) :
+'Label':/keyword,'Menu':{'Sub':/sub <param>}
+Voir la doc officielle.
+https://github.com/simplex-chat/simplex-chat/blob/stable/bots%2FREADME.md
 
 ### Hermes Agent Integration
 

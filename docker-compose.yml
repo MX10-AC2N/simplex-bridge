@@ -32,7 +32,8 @@ services:
       SIMPLEX_TOR: "false"
       SIMPLEX_STARTUP_TIMEOUT: "30"
       SIMPLEX_DNS_CHECK_HOST: "smp5.simplex.im"
-
+      # Exemple de commandes (optionnel)
+      # SIMPLEX_BOT_COMMANDS: "'Help':/help,'Status':/status,'Info':/info"
       PUID: "99"
       PGID: "100"
       TZ: "UTC"

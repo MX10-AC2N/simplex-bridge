@@ -1,0 +1,68 @@
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression-tests:
+    name: Regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+
+      - name: Check test runner exists
+        run: |
+          test -f tests/run-all.sh
+          test -s tests/run-all.sh
+
+      - name: Check Bash syntax
+        run: |
+          bash -n entrypoint.sh
+          bash -n install-websockets.sh
+          bash -n tests/*.sh
+
+      - name: Run complete regression suite
+        run: |
+          bash tests/run-all.sh
+
+      - name: Upload Python test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-bytecode
+          path: |
+            __pycache__/
+            tests/__pycache__/
+          if-no-files-found: ignore
+          retention-days: 3

@@ -7,6 +7,23 @@ All notable changes to MX10-AC2N SimpleX Bridge are documented here.
 
 ### Fixed
 
+- Fail startup when TCP port 5225 is already occupied in host-network mode,
+  preventing readiness checks from accepting an unrelated WebSocket daemon.
+- Configure the SimpleX CLI received-attachment directory through
+  `SIMPLEX_FILES_DIR` and `--files-folder` so Home Assistant can mount a
+  dedicated inbox volume read-only without access to the SimpleX identity DB.
+
+### Added
+
+- Documented the supported Home Assistant topology: both containers use
+  `network_mode: host` on the same Linux host and HA connects to
+  `ws://127.0.0.1:5225`.
+- Added separately named `simplex-inbox` and `simplex-outbox` volumes for
+  sharing attachments across independent Compose projects.
+
+
+### Fixed
+
 - **F-01**: `/ad` was called unconditionally on first-run setup, but it is
   not idempotent (it fails with `chatCmdError`/`duplicateContactLink` when
   an address already exists). Any crash between address creation and the

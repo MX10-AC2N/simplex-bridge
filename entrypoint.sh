@@ -224,8 +224,25 @@ else
     echo "[entrypoint] $DATA_DIR already owned by $PUID:$PGID — skipping chown"
 fi
 
+# ── Incoming files directory ───────────────────────────────────────
+# Keep received attachments in a dedicated volume so Home Assistant can
+# mount that volume read-only without gaining access to the SimpleX DB/keys.
+SIMPLEX_FILES_DIR="${SIMPLEX_FILES_DIR:-$DATA_DIR/received_files}"
+case "$SIMPLEX_FILES_DIR" in
+    /*) ;;
+    *) echo "[entrypoint] ERROR: SIMPLEX_FILES_DIR must be an absolute path"; exit 1 ;;
+esac
+if [ "$SIMPLEX_FILES_DIR" = "/" ]; then
+    echo "[entrypoint] ERROR: SIMPLEX_FILES_DIR must not be /"
+    exit 1
+fi
+mkdir -p "$SIMPLEX_FILES_DIR"
+if [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
+    chown -R "$PUID:$PGID" "$SIMPLEX_FILES_DIR"
+fi
+
 # ── Build extra flags ──────────────────────────────────────────────
-FLAGS=(-d "$DATA_DIR/simplex" -p 5225)
+FLAGS=(-d "$DATA_DIR/simplex" -p 5225 --files-folder "$SIMPLEX_FILES_DIR")
 
 # Automatically migrate older database schemas.
 FLAGS+=(-y)
@@ -245,6 +262,15 @@ fi
 
 if [ "$SIMPLEX_TOR" = "true" ]; then
     FLAGS+=(-x)
+fi
+
+# ── Refuse to attach to an unrelated host listener ─────────────────
+# With network_mode: host, a different process may already own 127.0.0.1:5225.
+# Do not mistake that process for this bridge's daemon during readiness checks.
+if port_listening 5225; then
+    echo "[entrypoint] ERROR: TCP port 5225 is already listening in the host network namespace."
+    echo "[entrypoint] Stop the other simplex-chat/bridge process before starting this container."
+    exit 1
 fi
 
 # ── Start simplex-chat daemon as non-root ──────────────────────────

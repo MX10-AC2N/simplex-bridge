@@ -6,6 +6,9 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/mx10-ac2n/simplex-bridge:latest
     container_name: simplex-bridge
+    # Home Assistant must also use network_mode: host on this same Linux host.
+    # Both containers then reach the CLI via ws://127.0.0.1:5225.
+    # Do not publish 5225 and do not enable SIMPLEX_SOCAT_PORT for this setup.
     network_mode: host
 
     cap_drop:
@@ -23,11 +26,14 @@ services:
 
     volumes:
       - simplex-data:/data
+      - simplex-inbox:/data/received_files
+      - simplex-outbox:/config/simplex_outbox
 
     environment:
       SIMPLEX_DISPLAY_NAME: "SimpleX Bridge"
       SIMPLEX_AUTO_ACCEPT: "true"
       SIMPLEX_FILES_ENABLED: "true"
+      SIMPLEX_FILES_DIR: "/data/received_files"
       SIMPLEX_MARK_READ: "true"
       SIMPLEX_TOR: "false"
       SIMPLEX_STARTUP_TIMEOUT: "30"
@@ -42,3 +48,7 @@ services:
 
 volumes:
   simplex-data:
+  simplex-inbox:
+    name: simplex-inbox
+  simplex-outbox:
+    name: simplex-outbox

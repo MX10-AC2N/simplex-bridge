@@ -48,10 +48,9 @@ Retrieve the bot contact address:
 docker compose exec simplex-bridge cat /data/bot_address.txt
 ```
 
-The named Docker volume `simplex-data` stores the SimpleX database,
-bot identity and attachments.
-
-Back up this volume regularly.
+The named Docker volume `simplex-data` stores the SimpleX database and bot identity.
+Incoming attachments are stored separately in `simplex-inbox`; the optional shared
+outbox is `simplex-outbox`. Back up `simplex-data` regularly.
 
 ## Using the Published Image
 
@@ -166,6 +165,7 @@ rules.
 | `SIMPLEX_MARK_READ` | true | Automatically mark messages as read |
 | `SIMPLEX_TOR` | false | Enable the SimpleX Tor option |
 | `SIMPLEX_STARTUP_TIMEOUT` | 15 | WebSocket startup timeout |
+| `SIMPLEX_FILES_DIR` | `/data/received_files` | Directory used by the CLI for received attachments (`--files-folder`) |
 | `SIMPLEX_DNS_CHECK_HOST` | smp5.simplex.im | DNS preflight hostname |
 | `SIMPLEX_SOCAT_PORT` | unset | Optional socat listener port |
 | `SIMPLEX_BOT_COMMAND` | unset | Commandes bot au format SimpleX |
@@ -174,6 +174,13 @@ rules.
 | `TZ` | UTC | Container timezone |
 
 PUID must be non-zero. The daemon is intentionally not run as root.
+
+### Shared attachment volumes with Home Assistant
+
+The Compose file gives the attachment volumes stable Docker names:
+`simplex-inbox` and `simplex-outbox`. A separate Home Assistant Compose project
+can mount those exact volumes as `external: true`. Keep `simplex-data` private to
+this bridge container; it contains the SimpleX database and identity keys.
 
 ## Network and Security
 
@@ -187,8 +194,14 @@ The API does not provide authentication by default.
 
 Host networking is recommended when Hermes Agent runs on the same machine.
 
-Both containers must share the host network namespace to communicate
-through `127.0.0.1:5225`.
+For the MX10-AC2N Home Assistant integration on the same Linux host, configure
+**both** `homeassistant` and `simplex-bridge` with `network_mode: host`. In the
+integration, use `ws://127.0.0.1:5225` (this is also its default URL). No Docker
+port mapping and no SOCAT proxy are needed for this topology.
+
+The host's TCP port 5225 must be free before the bridge starts. The entrypoint
+now fails closed if another process already listens on that port, instead of
+mistaking an unrelated listener for the SimpleX daemon.
 
 The container drops all Linux capabilities except:
 

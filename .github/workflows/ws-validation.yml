@@ -12,6 +12,10 @@ on:
       listen_events:
         description: "Secondes d'écoute des events entrants (0 = ignoré ; envoyer un message au bot pendant le run)"
         default: "0"
+      invite_link:
+        description: "Lien d'invitation SimpleX réel (depuis un autre appareil) pour tester accept_invite"
+        default: ""
+        required: false
 
 jobs:
   ws-validation:
@@ -47,6 +51,7 @@ jobs:
         env:
           DURATION: ${{ inputs.duration || 60 }}
           LISTEN_EVENTS: ${{ inputs.listen_events || 0 }}
+          SIMPLEX_INVITE_LINK: ${{ inputs.invite_link || '' }}
         run: |
           python3 tests/ws-validate.py \
             --url ws://127.0.0.1:5225 \

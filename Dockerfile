@@ -17,7 +17,7 @@ LABEL org.opencontainers.image.documentation="https://github.com/MX10-AC2N/simpl
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl iproute2 python3 python3-pip socat tzdata && \
-    pip3 install --no-cache-dir --break-system-packages websockets==17.0.1 && \
+    pip3 install --no-cache-dir --break-system-packages websockets==17.4 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install gosu — Ubuntu equivalent of Alpine's su-exec (static Go binary)

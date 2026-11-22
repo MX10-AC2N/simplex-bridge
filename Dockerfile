@@ -56,6 +56,10 @@ RUN set -eux; \
     rm -f /tmp/gosu.SHA256SUMS /tmp/gosu-checksum.txt /tmp/gosu.line; \
     chmod +x /usr/local/bin/gosu
 
+# Fix permission /data/received_files
+RUN mkdir -p /data/received_files \
+ && chown -R 99:100 /data
+
 # Create generic user — UID/GID are overridden at runtime via PUID/PGID
 # Use GID 911 as the build-time default (GID 1000 is taken on Ubuntu 24.04)
 RUN groupadd --system --gid 911 simplex && \

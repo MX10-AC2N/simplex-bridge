@@ -14,6 +14,8 @@ Usage :
   python3 ws-validate.py --url ws://127.0.0.1:5225 --summary "$GITHUB_STEP_SUMMARY"
   python3 ws-validate.py --url ws://127.0.0.1:5225 --probe-cmds "/help,/contacts,/version"
   python3 ws-validate.py --url ws://127.0.0.1:5225 --listen-events 30
+  # Pour un test réel d'acceptation d'invitation (lien depuis votre téléphone) :
+  python3 ws-validate.py --url ws://127.0.0.1:5225 --invite-link "https://simplex.im/..."
 
 Codes de sortie : 0 = tout passé, 1 = au moins un échec.
 """
@@ -98,6 +100,15 @@ async def rpc(ws, cmd, timeout=None):
     return await recv_matching(ws, cid, timeout=timeout or ARGS.timeout)
 
 
+def resp_obj(data):
+    """Retourne le champ resp décodé (dict) ou {}."""
+    if isinstance(data, dict):
+        resp = data.get("resp")
+        if isinstance(resp, dict):
+            return resp
+    return {}
+
+
 def resp_text(data):
     """Aplati une réponse RPC en texte pour analyse heuristique."""
     if not isinstance(data, dict):
@@ -107,6 +118,29 @@ def resp_text(data):
         return json.dumps(resp, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(resp)
+
+
+def is_chat_error(data):
+    """Détecte une erreur métier du CLI (chatCmdError)."""
+    return resp_obj(data).get("type") == "chatCmdError"
+
+
+def chat_error_message(data):
+    err = resp_obj(data).get("chatError", {})
+    return json.dumps(err, ensure_ascii=False)[:200]
+
+
+def extract_contacts(data):
+    """Extrait les noms locaux des contacts d'une réponse contactsList."""
+    contacts = resp_obj(data).get("contacts")
+    names = []
+    if isinstance(contacts, list):
+        for c in contacts:
+            if isinstance(c, dict):
+                name = c.get("localDisplayName") or (c.get("contact") or {}).get("localDisplayName")
+                if name:
+                    names.append(str(name))
+    return names
 
 
 async def probe_protocol(ws):
@@ -136,6 +170,9 @@ async def probe_protocol(ws):
 
 
 # ---------------------------------------------------------------- tests
+
+CONTACT_LINK_RE = re.compile(r"https?://\S+", re.I)
+
 
 async def test_t01_connect(results):
     """T01 — Connexion WebSocket et handshake."""
@@ -302,26 +339,32 @@ async def test_t08_stability_long_run(results):
 
 # ------------- tests métier (services utilisés par l'intégration HA) -----
 
-CONTACT_LINK_RE = re.compile(r"https?://\S+", re.I)
-
-
 async def test_t10_list_contacts(results):
     """T10 — Service HA « lister les contacts » (capteur configured_contacts).
-    Traduction CLI : /contacts. Retourne aussi la liste pour les tests suivants."""
+    Traduction CLI : /contacts. Une réponse contactsList bien formée = PASS,
+    même avec zéro contact (base CI vierge)."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         data, raw = await rpc(ws, "/contacts")
         if data is None:
             results["t10"].fail("/contacts : aucune réponse corrélée")
             return
-        text = resp_text(data)
-        # heuristique : la réponse mentionne-t-elle au moins un contact ?
-        has_contacts = bool(re.search(r"@[\w-]+", text)) and "no contacts" not in text.lower()
-        if has_contacts:
-            results["t10"].ok(f"liste des contacts obtenue : {raw[:300]}")
+        if is_chat_error(data):
+            results["t10"].fail(f"/contacts rejeté par le CLI : {chat_error_message(data)}")
+            return
+        if resp_obj(data).get("type") == "contactsList":
+            names = extract_contacts(data)
+            if names:
+                PROBE["contacts"] = names
+                results["t10"].ok(
+                    f"contactsList valide — {len(names)} contact(s) : {', '.join(names)}"
+                )
+            else:
+                results["t10"].ok(
+                    "contactsList valide — 0 contact (normal sur une base CI vierge)"
+                )
         else:
             results["t10"].warn(
-                "réponse corrélée OK mais aucun contact visible — "
-                "les tests d'envoi seront dégradés. Réponse : " + raw[:300]
+                "réponse corrélée mais type inattendu (attendu contactsList) : " + raw[:300]
             )
 
 
@@ -332,6 +375,9 @@ async def test_t11_create_invite(results):
         data, raw = await rpc(ws, "/connect")
         if data is None:
             results["t11"].fail("/connect : aucune réponse corrélée (create_invite HS)")
+            return
+        if is_chat_error(data):
+            results["t11"].fail(f"/connect rejeté par le CLI : {chat_error_message(data)}")
             return
         m = CONTACT_LINK_RE.search(raw)
         if m:
@@ -347,46 +393,63 @@ async def test_t11_create_invite(results):
 
 async def test_t12_accept_and_send(results):
     """T12 — Services HA « accept_invite » + « send_message ».
-    1) accepte le lien créé en T11 via /connect <lien> (connexion du bot à lui-même,
-       acceptable en CI : le volume est détruit après le run) ;
-    2) envoie un message au contact ainsi créé via @<nom> <message>.
-    Dégradé en WARN si aucun contact n'est disponible."""
+    Acceptation d'invitation :
+      - avec --invite-link <url> : accepte une VRAIE invitation (depuis un
+        autre appareil) — validation en conditions réelles ;
+      - sinon, tente l'auto-connexion avec le lien de T11 : la corrélation est
+        validée mais une erreur CLI (chatCmdError) est attendue et signalée
+        sans faire échouer le run (l'auto-connexion bot→bot est un cas dégénéré).
+    Envoi de message : @<contact> <texte>, comme notify.* / send_message / LLM.
+    """
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         # --- 1) acceptation d'invitation (service accept_invite)
-        accepted = False
-        invite = PROBE.get("last_invite")
+        invite = ARGS.invite_link or PROBE.get("last_invite")
+        mode_label = "lien fourni (--invite-link)" if ARGS.invite_link else "auto-connexion bot→bot"
+        accepted = None
         if invite:
             data, raw = await rpc(ws, f"/connect {invite}", timeout=ARGS.timeout * 2)
-            if data is not None:
-                accepted = True
-                results_part = f"accept_invite : réponse corrélée ({raw[:150]})"
+            if data is None:
+                accepted = False
+                results_part = f"accept_invite [{mode_label}] : pas de réponse corrélée"
+            elif is_chat_error(data):
+                accepted = False
+                results_part = (
+                    f"accept_invite [{mode_label}] : erreur CLI (corrélation OK) — "
+                    f"{chat_error_message(data)}"
+                )
             else:
-                results_part = "accept_invite : pas de réponse corrélée"
+                accepted = True
+                results_part = f"accept_invite [{mode_label}] : accepté ({raw[:150]})"
         else:
-            results_part = "accept_invite ignoré (pas de lien de T11)"
+            results_part = "accept_invite ignoré (aucun lien disponible)"
 
         # --- 2) envoi de message (service send_message / notify.*)
-        # récupère un destinataire existant ou fraîchement créé
         data, raw = await rpc(ws, "/contacts")
-        recipient = None
-        if data is not None:
+        names = extract_contacts(data) if data else []
+        if not names:
+            # fallback heuristique : @handle dans la réponse brute
             m = re.search(r"@([\w-]{2,})", resp_text(data))
-            if m:
-                recipient = m.group(1)
+            recipient = m.group(1) if m else None
+        else:
+            recipient = names[0]
         if not recipient:
+            extra = ""
+            if accepted is False and not ARGS.invite_link:
+                extra = (
+                    " Astuce : fournir un vrai lien via --invite-link (depuis un autre "
+                    "appareil SimpleX) pour tester accept + send en conditions réelles."
+                )
             results["t12"].warn(
-                f"{results_part} — envoi non testé : aucun contact disponible. "
-                "Ajoute un contact (ou accepte l'invite de T11) pour couvrir send_message."
+                f"{results_part} — envoi non testé : aucun contact disponible.{extra}"
             )
             return
         sent_ok, sent_raw = await rpc(
             ws, f"@{recipient} ping de validation ws-validate.py"
         )
         if sent_ok:
-            lowered = resp_text(sent_raw).lower()
-            if "error" in lowered or "err:" in lowered:
+            if is_chat_error(sent_raw):
                 results["t12"].warn(
-                    f"{results_part} — envoi répondu avec une erreur apparente : {sent_raw[:200]}"
+                    f"{results_part} — envoi à @{recipient} rejeté : {chat_error_message(sent_raw)}"
                 )
             else:
                 results["t12"].ok(
@@ -488,7 +551,7 @@ def write_summary(results, args):
 
 # ---------------------------------------------------------------- main
 
-PROBE = {"mode": None, "cmd": None, "last_invite": None}
+PROBE = {"mode": None, "cmd": None, "last_invite": None, "contacts": []}
 
 TESTS = {
     "t01": "T01 Connexion WebSocket",
@@ -515,6 +578,8 @@ async def main():
                         help="commandes candidates pour la sonde de protocole, séparées par virgules")
     parser.add_argument("--listen-events", type=int, default=0,
                         help="secondes d'écoute passive des événements entrants (0 = ignoré)")
+    parser.add_argument("--invite-link", default=os.environ.get("SIMPLEX_INVITE_LINK"),
+                        help="vrai lien d'invitation SimpleX pour tester accept_invite en conditions réelles")
     parser.add_argument("--skip", default="", help="tests à ignorer, ex: t08,t12")
     parser.add_argument("--summary", default=None, help="fichier pour le résumé markdown (CI)")
     global ARGS

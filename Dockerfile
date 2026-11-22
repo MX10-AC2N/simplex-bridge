@@ -3,15 +3,15 @@ FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffb
 # OCI labels — also set at build time via docker/metadata-action for versioned tags
 LABEL org.opencontainers.image.title="simplex-bridge"
 LABEL org.opencontainers.image.description="SimpleX Chat bot daemon — WebSocket API for Hermes Agent and messaging bots"
-LABEL org.opencontainers.image.vendor="libre-7"
+LABEL org.opencontainers.image.vendor="MX10-AC2N"
 # This image REDISTRIBUTES the simplex-chat and simplexmq binaries, both of
 # which are AGPL-3.0. The label must describe the terms the shipped artifact
 # is actually under, not just this repo's own source license (GPL-3.0).
 # See the "Bundled third-party components" section in README.md.
 LABEL org.opencontainers.image.licenses="AGPL-3.0"
-LABEL org.opencontainers.image.url="https://github.com/libre-7/simplex-bridge"
-LABEL org.opencontainers.image.source="https://github.com/libre-7/simplex-bridge"
-LABEL org.opencontainers.image.documentation="https://github.com/libre-7/simplex-bridge#readme"
+LABEL org.opencontainers.image.url="https://github.com/MX10-AC2N/simplex-bridge"
+LABEL org.opencontainers.image.source="https://github.com/MX10-AC2N/simplex-bridge"
+LABEL org.opencontainers.image.documentation="https://github.com/MX10-AC2N/simplex-bridge"
 
 # SimpleX Chat uses the SMP protocol — no persistent user IDs, fully private
 RUN apt-get update && \

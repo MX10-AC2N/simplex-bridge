@@ -171,14 +171,56 @@ def find_keys(o, acc=None):
 
 
 # ------------------------------------------------- analyse des événements CLI
+#
+# Structure CLI v7 observée sur la passerelle (d'après les runs réels) :
+#   newChatItems.chatItems[].chatItem = {
+#     "itemId": N,
+#     "meta": {"chatDir": {"type": "directRcv"|"directSnd"|...}, ...},
+#     "content": {"type": "msgContent", "msgContent": {"type": "text"|"image"|
+#                 "video"|"file"|"...", "text": "...", "fileName": "..."}}}
+# Le champ content enveloppe msgContent ; on cherche donc aux deux endroits,
+# avec un balayage récursif en secours pour les variantes de version.
+
+def find_first_value(o, key):
+    """Première valeur trouvée pour une clé donnée, en profondeur d'abord."""
+    if isinstance(o, dict):
+        if key in o:
+            return o[key]
+        for v in o.values():
+            r = find_first_value(v, key)
+            if r is not None:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find_first_value(v, key)
+            if r is not None:
+                return r
+    return None
+
+
+def extract_msg_content(chat_item):
+    """Retourne le dict msgContent d'un chatItem, quel que soit l'emplacement :
+    chatItem.content.msgContent (forme v7), chatItem.msgContent (forme plate),
+    ou recherche récursive en dernier recours."""
+    content = chat_item.get("content")
+    if isinstance(content, dict):
+        mc = content.get("msgContent")
+        if isinstance(mc, dict):
+            return mc
+    mc = chat_item.get("msgContent")
+    if isinstance(mc, dict):
+        return mc
+    mc = find_first_value(chat_item, "msgContent")
+    return mc if isinstance(mc, dict) else {}
+
 
 def parse_event(raw):
     """Décode une frame d'événement CLI :
     retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set}
     ou None si la frame n'est pas un événement exploitable.
-    Chaque résumé de chatItem contient direction (chatDir.type), kind
-    (msgContent.type), item_id, text_preview — exactement les primitives
-    que l'intégration HA dérive pour alias/chat_ref/text/direction/item_id."""
+    Chaque résumé contient direction (chatDir.type), kind (msgContent.type),
+    item_id, text_preview — les primitives que HA dérive pour
+    alias/chat_ref/text/direction/item_id."""
     try:
         obj = json.loads(raw)
     except (ValueError, TypeError):
@@ -196,15 +238,15 @@ def parse_event(raw):
         for it in items:
             if not isinstance(it, dict):
                 continue
-            # CLI v7 : chatItems[].chatItem.{meta.chatDir, msgContent}
+            # CLI v7 : chatItems[].chatItem.{meta.chatDir, content.msgContent}
             chat_item = it.get("chatItem") if isinstance(it.get("chatItem"), dict) else it
             meta = chat_item.get("meta") if isinstance(chat_item.get("meta"), dict) else {}
             chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else \
                        (chat_item.get("chatDir") if isinstance(chat_item.get("chatDir"), dict) else {})
             direction = chat_dir.get("type") or "?"
-            mc = chat_item.get("msgContent") if isinstance(chat_item.get("msgContent"), dict) else {}
+            mc = extract_msg_content(chat_item)
             kind = mc.get("type") or "?"
-            text = mc.get("text") or mc.get("fileName") or mc.get("caption") or ""
+            text = mc.get("text") or mc.get("fileName") or mc.get("filePath") or ""
             item_id = meta.get("itemId") or chat_item.get("itemId") or "?"
             out["items"].append({
                 "direction": str(direction),
@@ -604,19 +646,19 @@ async def test_t12_pairing_and_send(results):
               f"(fenêtre de {window} s — décompte affiché toutes les 10 s)",
               flush=True)
         got_reply = False
+        seen_keys = set()
         received_notes = []
         last_mark = None
         while time.monotonic() < deadline:
-            # tout événement newChatItems apparu depuis le début de la fenêtre
-            ev = parse_event(EVENTS[-1]) if EVENTS else None
-            for raw in [e for e in EVENTS]:
-                items = event_incoming_items(raw)
-                for i in items:
-                    key = (i["item_id"], i["direction"])
-                    if key not in {(r[0], r[1]) for r in received_notes}:
-                        received_notes.append((i["item_id"], i["direction"], i["kind"], i["text_preview"]))
+            for raw in EVENTS:
+                for i in event_incoming_items(raw):
+                    key = (i["item_id"], i["direction"], i["text_preview"])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        received_notes.append((i["item_id"], i["kind"], i["text_preview"]))
                         print(f"   📥 message reçu du téléphone ! direction={i['direction']} "
-                              f"contenu={i['kind']} extrait={i['text_preview']!r}", flush=True)
+                              f"contenu={i['kind']} itemId={i['item_id']} "
+                              f"extrait={i['text_preview']!r}", flush=True)
                         got_reply = True
             if got_reply:
                 break
@@ -629,7 +671,7 @@ async def test_t12_pairing_and_send(results):
             await asyncio.sleep(1)
         if got_reply:
             notes.append("message(s) retour reçu(s) du téléphone (directRcv) : "
-                         + "; ".join(f"[{k}] {p!r}" for _, _, k, p in received_notes))
+                         + "; ".join(f"[{k}] {p!r}" for _, k, p in received_notes))
             results["t12"].ok(" ; ".join(notes))
         else:
             notes.append(
@@ -645,10 +687,11 @@ async def test_t09_eval_events(results):
     """T09 — Évaluation du flux entrant capturé par le listener pendant toute
     la suite. Vérifie les primitives CLI que HA consomme :
       - événements de cycle de contact (contactConnecting/contactConnected) ;
-      - newChatItems avec chatItem.meta.itemId, chatDir, msgContent ;
+      - newChatItems avec chatItem.meta.itemId, chatDir, content.msgContent ;
       - au moins un message REÇU (chatDir directRcv) = event
         simplex_message_received + sensor last_message garantis côté HA.
-    Affiche un résumé lisible de chaque chatItem (direction, type, extrait)."""
+    Affiche un résumé lisible de chaque chatItem + le JSON brut du premier
+    newChatItems (pour vérifier la structure exacte de la version du CLI)."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
@@ -660,11 +703,14 @@ async def test_t09_eval_events(results):
     directions_seen = set()
     kinds_seen = set()
     fields_seen = set()
+    first_newchatitems_raw = None
     for raw in EVENTS:
         ev = parse_event(raw)
         if not ev:
             continue
         fields_seen |= ev["raw_keys"]
+        if ev["type"] == "newChatItems" and first_newchatitems_raw is None:
+            first_newchatitems_raw = raw
         for i in ev["items"]:
             directions_seen.add(i["direction"])
             kinds_seen.add(i["kind"])
@@ -673,17 +719,29 @@ async def test_t09_eval_events(results):
                 f"itemId={i['item_id']} extrait={i['text_preview']!r}"
             )
 
-    has_chat_items = "newChatItems" in summarize_event_types(EVENTS)
+    has_chat_items = "newChatItems" in type_summary
     has_incoming = any(d.lower().startswith("directrcv") for d in directions_seen)
     item_fields = {"itemId", "chatDir", "msgContent"} & fields_seen
     sample = "\n".join(item_lines[:10]) or "(aucun chatItem dans les événements capturés)"
+    raw_sample = (first_newchatitems_raw or "")[:1200]
 
     if has_chat_items and has_incoming and len(item_fields) == 3:
         results["t09"].ok(
             f"{len(EVENTS)} événements [{type_summary}] — message(s) ENTRANT validés "
             f"(directRcv), contenus vus : {', '.join(sorted(kinds_seen))}. Champs CLI "
             f"itemId/chatDir/msgContent présents (base des alias/chat_ref/text/"
-            f"direction/item_id de HA) :\n{sample}"
+            f"direction/item_id de HA) :\n{sample}\n"
+            f"JSON brut du 1er newChatItems : {raw_sample}"
+        )
+    elif has_chat_items and has_incoming:
+        # directRcv validé mais structure msgContent à confirmer :
+        # afficher le JSON brut pour ajuster l'extracteur si besoin
+        results["t09"].warn(
+            f"{len(EVENTS)} événements [{type_summary}] — messages ENTRANTS (directRcv) "
+            f"capturés et itemId/chatDir validés, mais msgContent non localisé dans la "
+            f"structure (champs vus : {', '.join(sorted(item_fields))}) — le JSON brut "
+            f"ci-dessous montre l'emplacement exact à mapper côté HA :\n{sample}\n"
+            f"JSON brut du 1er newChatItems : {raw_sample}"
         )
     elif has_chat_items and len(item_fields) == 3:
         results["t09"].warn(

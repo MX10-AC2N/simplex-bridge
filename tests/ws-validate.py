@@ -17,9 +17,23 @@ Appairage interactif (UN SEUL RUN, aucune fenêtre à synchroniser) :
      (Add contact → paste link) pendant que le run attend ;
   4. le bot détecte le contact, envoie « ping de validation » (vous le recevez) ;
   5. RÉPONDEZ depuis votre téléphone PENDANT LE COMPTE À REBOURS (90 s) :
-     chaque message reçu (texte, photo, vidéo, fichier) est affiché EN DIRECT
-     dans le log avec sa direction CLI (directRcv) et son type de contenu,
-     et T09 valide les champs CLI que HA consomme (itemId, chatDir, msgContent).
+     les items protocolaires automatiques (banner E2EE, négociation de
+     features) sont filtrés — seuls vos VRAIS messages (texte, photo, vidéo,
+     fichier) sont affichés EN DIRECT et comptent comme réponse.
+
+Structure CLI v7 établie par les runs (cartographie réelle) :
+  newChatItems.chatItems[] = {
+    "chatInfo": {"type": "direct", "contact": {"localDisplayName": "alias"}},
+    "chatItem": {
+      "itemId": N,
+      "meta": {"chatDir": {"type": "directRcv"|"directSnd"},
+               "itemText": "aperçu du texte du message"},
+      "content": {"type": "chatBanner"|"rcvDirectE2EEInfo"|"rcvChatFeature"
+                  |"text"|"image"|"video"|"file"|...}
+    }}
+  NB : les types chatBanner/rcvDirectE2EEInfo/rcvChatFeature/... sont des
+  items SYSTÈME générés à la connexion, pas des messages utilisateur.
+  Le texte réel est dans meta.itemText (source la plus fiable en v7).
 
 IMPORTANT : répondez pendant le run. Un message envoyé APRÈS la fin du run
 part vers un bot dont le volume vient d'être détruit (down -v) : il n'arrivera
@@ -69,6 +83,31 @@ PROBE = {"mode": None, "cmd": None, "last_invite": None, "contacts": []}
 EVENTS = []          # frames reçus sur la connexion d'écoute dédiée (toute la suite)
 LISTENER_TASK = None
 INVITE_PUBLISHED = False
+
+
+# Types de contenu SYSTÈME générés automatiquement à la connexion (CLI v7).
+# Ils ne sont PAS des messages utilisateur et ne doivent jamais être comptés
+# comme réponse (source du bug des runs précédents : T12 s'arrêtait dessus).
+SYSTEM_CONTENT_TYPES = {
+    "chatBanner", "rcvDirectE2EEInfo", "sndDirectE2EEInfo",
+    "rcvChatFeature", "sndChatFeature", "rcvCallFeature", "sndCallFeature",
+    "intro", "rcvGroupInvitation", "sentGroupInvitation", "grpMemIntro",
+    "groupInvitation", "autoReply", "delete", "deleted",
+}
+
+# Types de contenu considérés comme de vrais messages utilisateur (v7).
+# Un type inconnu hors de la liste système est aussi considéré utilisateur
+# (tolérance aux futures versions) — signalé en info.
+USER_CONTENT_HINTS = {"text", "image", "video", "file", "voice", "audio", "link"}
+
+
+def is_user_content(kind):
+    """Vrai si le type de contenu correspond à un message utilisateur réel."""
+    if not kind or kind == "?":
+        return False
+    if kind in SYSTEM_CONTENT_TYPES:
+        return False
+    return True  # tout ce qui n'est pas système = potentiellement utilisateur
 
 
 # ---------------------------------------------------------------- helpers
@@ -172,75 +211,30 @@ def find_keys(o, acc=None):
 
 # ------------------------------------------------- analyse des événements CLI
 
-KEY_PATH_RE = re.compile(r"content|msg|text|file|image|video|caption|audio", re.I)
-
-
-def collect_key_paths(o, prefix="$", acc=None):
-    """Cartographie récursive : chemin (breadcrumb) de chaque clé dont le nom
-    ressemble à du contenu de message, avec aperçu de la valeur. Sert à
-    localiser où la version du CLI place réellement le corps du message."""
-    if acc is None:
-        acc = []
-    if isinstance(o, dict):
-        for k, v in o.items():
-            path = f"{prefix}.{k}"
-            if KEY_PATH_RE.search(str(k)) and not isinstance(v, (dict, list)):
-                preview = str(v)[:60]
-                acc.append(f"{path} = {preview!r}")
-            collect_key_paths(v, path, acc)
-    elif isinstance(o, list):
-        for idx, v in enumerate(o[:5]):  # limiter la profondeur des listes
-            collect_key_paths(v, f"{prefix}[{idx}]", acc)
-    return acc
-
-
-def find_first_value(o, key):
-    """Première valeur trouvée pour une clé donnée, en profondeur d'abord."""
-    if isinstance(o, dict):
-        if key in o:
-            return o[key]
-        for v in o.values():
-            r = find_first_value(v, key)
-            if r is not None:
-                return r
-    elif isinstance(o, list):
-        for v in o:
-            r = find_first_value(v, key)
-            if r is not None:
-                return r
-    return None
-
-
 def extract_msg_content(chat_item):
-    """Retourne le dict de contenu d'un chatItem quel que soit l'emplacement.
-    Formes connues : chatItem.content.msgContent (v7 documentée),
-    chatItem.msgContent (plate). Sinon : recherche de toute clé dont le nom
-    contient 'msgContent' ou 'content' (variantes de sérialisation)."""
+    """Retourne le dict de contenu d'un chatItem : en CLI v7 le type est
+    directement chatItem.content.type (forme abrégée). Fallback sur la forme
+    documentée content.msgContent et la forme plate msgContent."""
     content = chat_item.get("content")
     if isinstance(content, dict):
         mc = content.get("msgContent")
         if isinstance(mc, dict):
             return mc
-        # forme abrégée possible : content = {"type": "...", ...} directement
         if "type" in content:
             return content
     mc = chat_item.get("msgContent")
     if isinstance(mc, dict):
         return mc
-    for key in ("msgContent", "content", "msg"):
-        mc = find_first_value(chat_item, key)
-        if isinstance(mc, dict) and mc.get("type"):
-            return mc
     return {}
 
 
 def parse_event(raw):
     """Décode une frame d'événement CLI :
-    retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set,
-    "key_paths": [...]} ou None si la frame n'est pas un événement exploitable.
-    Chaque résumé contient direction (chatDir.type), kind (type de contenu),
-    item_id, contact (alias depuis chatInfo) et text_preview — les primitives
-    que HA dérive pour alias/chat_ref/text/direction/item_id."""
+    retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set}
+    ou None si la frame n'est pas un événement exploitable.
+    Chaque résumé : direction (chatDir.type), kind (content.type), item_id,
+    contact (chatInfo.contact.localDisplayName = alias HA), user_kind
+    (True si message utilisateur réel), text_preview (meta.itemText en v7)."""
     try:
         obj = json.loads(raw)
     except (ValueError, TypeError):
@@ -248,10 +242,8 @@ def parse_event(raw):
     resp = obj.get("resp") if isinstance(obj, dict) else None
     if not isinstance(resp, dict):
         return None
-    out = {"type": resp.get("type"), "items": [], "raw_keys": set(),
-           "key_paths": []}
+    out = {"type": resp.get("type"), "items": [], "raw_keys": set()}
     find_keys(resp, out["raw_keys"])
-    out["key_paths"] = collect_key_paths(resp)
 
     if out["type"] == "newChatItems":
         items = resp.get("chatItems") or []
@@ -268,7 +260,7 @@ def parse_event(raw):
                 if isinstance(c, dict):
                     contact = str(c.get("localDisplayName") or
                                   (c.get("profile") or {}).get("displayName") or "?")
-            # CLI v7 : chatItems[].chatItem.{meta.chatDir, content.msgContent}
+            # CLI v7 : chatItems[].chatItem.{meta.chatDir, meta.itemText, content.type}
             chat_item = it.get("chatItem") if isinstance(it.get("chatItem"), dict) else it
             meta = chat_item.get("meta") if isinstance(chat_item.get("meta"), dict) else {}
             chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else \
@@ -276,24 +268,31 @@ def parse_event(raw):
             direction = chat_dir.get("type") or "?"
             mc = extract_msg_content(chat_item)
             kind = mc.get("type") or "?"
-            text = mc.get("text") or mc.get("fileName") or mc.get("filePath") or ""
+            # v7 : l'aperçu du texte est dans meta.itemText ; fallback sur
+            # les champs msgContent pour les autres formes.
+            text = (meta.get("itemText")
+                    or mc.get("text") or mc.get("fileName")
+                    or mc.get("filePath") or mc.get("caption") or "")
             item_id = meta.get("itemId") or chat_item.get("itemId") or "?"
             out["items"].append({
                 "direction": str(direction),
                 "kind": str(kind),
                 "item_id": item_id,
                 "contact": contact,
+                "user_kind": is_user_content(str(kind)),
                 "text_preview": str(text)[:80],
             })
     return out
 
 
-def event_incoming_items(raw):
-    """Résumés des chatItems RECUS (directRcv) d'une frame newChatItems."""
+def event_incoming_user_items(raw):
+    """Résumés des chatItems RECUS (directRcv) qui sont de VRAIS messages
+    utilisateur (les items système de connexion sont exclus)."""
     ev = parse_event(raw)
     if not ev or ev["type"] != "newChatItems":
         return []
-    return [i for i in ev["items"] if i["direction"].lower().startswith("directrcv")]
+    return [i for i in ev["items"]
+            if i["direction"].lower().startswith("directrcv") and i["user_kind"]]
 
 
 def summarize_event_types(events):
@@ -608,8 +607,9 @@ async def test_t12_pairing_and_send(results):
       2. sinon le bot génère son propre lien (ligne « INVITE LINK: … », une fois) ;
       3. contact établi → envoie « ping de validation » (vous le recevez) ;
       4. COMPTE À REBOURS affiché toutes les 10 s pendant l'attente de votre
-         message retour : chaque message reçu (texte/image/vidéo/fichier)
-         est affiché EN DIRECT dans le log."""
+         message retour. Les items système (banner E2EE, features) sont
+         FILTRÉS : seule une vraie réponse utilisateur (texte/photo/vidéo/
+         fichier) clôt la fenêtre."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         recipient = None
         notes = []
@@ -670,26 +670,40 @@ async def test_t12_pairing_and_send(results):
             return
         notes.append(f"ping envoyé à @{recipient} (vérifiez la réception sur le téléphone)")
 
-        # --- attente du message retour avec compte à rebours VISIBLE
+        # --- attente d'une VRAIE réponse utilisateur, avec compte à rebours
         window = ARGS.incoming_wait
         deadline = time.monotonic() + window
         print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
-              f"(fenêtre de {window} s — décompte affiché toutes les 10 s)",
+              f"(fenêtre de {window} s — décompte affiché toutes les 10 s ; "
+              f"les items système de connexion sont ignorés)",
               flush=True)
         got_reply = False
         seen_keys = set()
         received_notes = []
+        system_count = 0
         last_mark = None
         while time.monotonic() < deadline:
             for raw in EVENTS:
-                for i in event_incoming_items(raw):
+                ev = parse_event(raw)
+                if not ev or ev["type"] != "newChatItems":
+                    continue
+                for i in ev["items"]:
+                    if i["direction"].lower().startswith("directrcv") and not i["user_kind"]:
+                        # item système : compté pour info, jamais traité comme réponse
+                        key = (i["item_id"], "sys")
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            system_count += 1
+                        continue
+                    if not i["direction"].lower().startswith("directrcv"):
+                        continue
                     key = (i["item_id"], i["direction"], i["text_preview"], i["kind"])
                     if key not in seen_keys:
                         seen_keys.add(key)
                         received_notes.append((i["item_id"], i["contact"], i["kind"], i["text_preview"]))
-                        print(f"   📥 message reçu du téléphone ! de=@{i['contact']} "
-                              f"direction={i['direction']} contenu={i['kind']} "
-                              f"itemId={i['item_id']} extrait={i['text_preview']!r}", flush=True)
+                        print(f"   📥 VRAI MESSAGE reçu du téléphone ! de=@{i['contact']} "
+                              f"contenu={i['kind']} itemId={i['item_id']} "
+                              f"texte={i['text_preview']!r}", flush=True)
                         got_reply = True
             if got_reply:
                 break
@@ -700,13 +714,16 @@ async def test_t12_pairing_and_send(results):
                       flush=True)
                 last_mark = mark
             await asyncio.sleep(1)
+        if system_count:
+            notes.append(f"{system_count} item(s) système de connexion filtrés "
+                         "(banner E2EE/features — non comptés comme réponse)")
         if got_reply:
-            notes.append("message(s) retour reçu(s) du téléphone (directRcv) : "
+            notes.append("message(s) retour reçu(s) du téléphone (directRcv, non-système) : "
                          + "; ".join(f"de=@{c} [{k}] {p!r}" for _, c, k, p in received_notes))
             results["t12"].ok(" ; ".join(notes))
         else:
             notes.append(
-                f"aucun message retour pendant la fenêtre de {window} s — répondez au ping "
+                f"aucun vrai message retour pendant la fenêtre de {window} s — répondez au ping "
                 "dès l'affichage « RÉPONDEZ MAINTENANT » (le décompte s'affiche). "
                 "ATTENTION : un message envoyé après la fin du run va vers un bot dont "
                 "le volume a été détruit — il ne peut pas être reçu."
@@ -714,12 +731,34 @@ async def test_t12_pairing_and_send(results):
             results["t12"].warn(" ; ".join(notes))
 
 
+KEY_PATH_RE = re.compile(r"content|msg|text|file|image|video|caption|audio|itemText", re.I)
+
+
+def collect_key_paths(o, prefix="$", acc=None):
+    """Cartographie récursive : chemin (breadcrumb) de chaque clé dont le nom
+    ressemble à du contenu de message, avec aperçu de la valeur. Sert à
+    localiser où la version du CLI place réellement le corps du message."""
+    if acc is None:
+        acc = []
+    if isinstance(o, dict):
+        for k, v in o.items():
+            path = f"{prefix}.{k}"
+            if KEY_PATH_RE.search(str(k)) and not isinstance(v, (dict, list)):
+                preview = str(v)[:60]
+                acc.append(f"{path} = {preview!r}")
+            collect_key_paths(v, path, acc)
+    elif isinstance(o, list):
+        for idx, v in enumerate(o[:5]):  # limiter la profondeur des listes
+            collect_key_paths(v, f"{prefix}[{idx}]", acc)
+    return acc
+
+
 def dump_event_diagnostics(raw):
     """Diagnostics complets d'une frame : cartographie des chemins de clés
     suspectes (contenu du message) + JSON intégral. Sort à la fois dans le
-    log (stdout) et dans le Summary CI, sans troncature de la structure."""
+    log (stdout) et dans le Summary CI."""
     ev = parse_event(raw)
-    paths = (ev or {}).get("key_paths") or []
+    paths = (ev or {}).get("raw_keys", set()) and collect_key_paths(json.loads(raw).get("resp", {})) or []
     lines = ["   🔍 CARTOGRAPHIE DES CLÉS DE CONTENU (chemin = valeur) :"]
     for p in paths[:40]:
         lines.append(f"      {p}")
@@ -742,13 +781,14 @@ def dump_event_diagnostics(raw):
 
 async def test_t09_eval_events(results):
     """T09 — Évaluation du flux entrant capturé par le listener pendant toute
-    la suite. Vérifie les primitives CLI que HA consomme :
-      - événements de cycle de contact (contactConnecting/contactConnected) ;
-      - newChatItems avec chatItem.meta.itemId, chatDir, contenu du message ;
-      - au moins un message REÇU (chatDir directRcv) = event
-        simplex_message_received + sensor last_message garantis côté HA.
-    En cas de doute sur l'emplacement du contenu, dump une cartographie
-    complète des clés + le JSON intégral de la frame."""
+    la suite, selon la structure CLI v7 établie par cartographie :
+      - contact cycle : contactConnecting/contactConnected ;
+      - items système : chatBanner / rcvDirectE2EEInfo / rcvChatFeature…
+        (normaux, listés pour info) ;
+      - messages utilisateur : directRcv avec content.type non-système et
+        meta.itemText → équivalent CLI de l'event simplex_message_received
+        (alias=chatInfo.contact.localDisplayName, direction=chatDir,
+        text=itemText, item_id=meta.itemId)."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
@@ -756,13 +796,11 @@ async def test_t09_eval_events(results):
         )
         return
     type_summary = summarize_event_types(EVENTS)
-    item_lines = []
-    directions_seen = set()
-    kinds_seen = set()
+    user_lines, system_lines = [], []
+    user_dirs, user_kinds, contacts_seen = set(), set(), set()
+    system_kinds = set()
     fields_seen = set()
-    contacts_seen = set()
     first_newchatitems_raw = None
-    dumped = False
     for raw in EVENTS:
         ev = parse_event(raw)
         if not ev:
@@ -772,56 +810,50 @@ async def test_t09_eval_events(results):
             if first_newchatitems_raw is None:
                 first_newchatitems_raw = raw
             for i in ev["items"]:
-                directions_seen.add(i["direction"])
-                kinds_seen.add(i["kind"])
                 contacts_seen.add(i["contact"])
-                item_lines.append(
-                    f"chatItem: de=@{i['contact']} direction={i['direction']} "
-                    f"contenu={i['kind']} itemId={i['item_id']} "
-                    f"extrait={i['text_preview']!r}"
-                )
+                if i["user_kind"]:
+                    user_dirs.add(i["direction"])
+                    user_kinds.add(i["kind"])
+                    user_lines.append(
+                        f"MESSAGE utilisateur : de=@{i['contact']} direction="
+                        f"{i['direction']} contenu={i['kind']} itemId={i['item_id']} "
+                        f"texte={i['text_preview']!r}"
+                    )
+                else:
+                    system_kinds.add(i["kind"])
+                    system_lines.append(
+                        f"item système : de=@{i['contact']} direction={i['direction']} "
+                        f"contenu={i['kind']} itemId={i['item_id']}"
+                    )
 
     has_chat_items = "newChatItems" in type_summary
-    has_incoming = any(d.lower().startswith("directrcv") for d in directions_seen)
-    item_fields = {"itemId", "chatDir", "msgContent"} & fields_seen
-    sample = "\n".join(item_lines[:10]) or "(aucun chatItem dans les événements capturés)"
+    has_incoming_user = any(d.lower().startswith("directrcv") for d in user_dirs)
+    item_fields = {"itemId", "chatDir", "itemText"} & fields_seen
+    user_sample = "\n".join(user_lines[:10]) or "(aucun)"
+    system_sample = "\n".join(system_lines[:6]) or "(aucun)"
 
-    if has_chat_items and has_incoming and len(item_fields) == 3:
+    if has_chat_items and has_incoming_user:
         results["t09"].ok(
-            f"{len(EVENTS)} événements [{type_summary}] — message(s) ENTRANT validés "
-            f"(directRcv), contacts vus : {', '.join('@' + c for c in sorted(contacts_seen))}, "
-            f"contenus vus : {', '.join(sorted(kinds_seen))}. Champs CLI itemId/chatDir/"
-            f"msgContent présents (base des alias/chat_ref/text/direction/item_id de HA) :\n"
-            f"{sample}"
+            f"{len(EVENTS)} événements [{type_summary}] — flux entrant VALIDÉ : "
+            f"message(s) utilisateur directRcv capturé(s), alias (chatInfo.contact."
+            f"localDisplayName), direction (chatDir), texte (meta.itemText) et "
+            f"itemId présents — les 4 champs que HA mappe pour "
+            f"simplex_message_received. Contenus vus : "
+            f"{', '.join(sorted(user_kinds))} :\n{user_sample}\n"
+            f"items système filtrés ({len(system_lines)}) : {', '.join(sorted(system_kinds))}"
         )
-    elif has_chat_items and has_incoming:
-        # directRcv validé mais emplacement du contenu inconnu : diagnostics complets
-        if not dumped and first_newchatitems_raw:
-            print("\n>>> T09 : msgContent non localisé — dump diagnostique complet :\n",
-                  flush=True)
-            dump_event_diagnostics(first_newchatitems_raw)
-            dumped = True
+    elif has_chat_items and system_lines:
         results["t09"].warn(
-            f"{len(EVENTS)} événements [{type_summary}] — messages ENTRANTS (directRcv) "
-            f"capturés, itemId/chatDir/alias(contact) validés, mais l'emplacement du "
-            f"contenu du message n'est pas celui attendu (champs ciblés vus : "
-            f"{', '.join(sorted(item_fields))}). La cartographie des clés + le JSON "
-            f"intégral ci-dessus montrent où il se trouve réellement — à mapper côté HA "
-            f"si nécessaire :\n{sample}"
-        )
-    elif has_chat_items and len(item_fields) == 3:
-        results["t09"].warn(
-            f"{len(EVENTS)} événements [{type_summary}] — newChatItems et champs CLI "
-            f"présents ({', '.join(sorted(item_fields))}) ; directions vues : "
-            f"{', '.join(sorted(directions_seen))} ; mais aucun directRcv : répondez au "
-            "ping pendant le compte à rebours de T12 pour valider le sens incoming :\n"
-            + sample
+            f"{len(EVENTS)} événements [{type_summary}] — connexion et items système "
+            f"capturés ({', '.join(sorted(system_kinds))}), mais AUCUN vrai message "
+            "utilisateur directRcv : répondez au ping pendant le compte à rebours de "
+            "T12 (les items système ne ferment plus la fenêtre) :\n{system_sample}"
         )
     else:
         results["t09"].warn(
             f"{len(EVENTS)} événements [{type_summary}] — cycle de connexion capturé "
             "mais aucun chatItem exploitable (normale si personne n'a écrit au bot "
-            "pendant le run) :\n" + sample
+            "pendant le run)"
         )
 
 

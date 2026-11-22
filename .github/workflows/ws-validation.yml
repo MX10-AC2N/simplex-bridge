@@ -1,0 +1,70 @@
+name: WebSocket gateway validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Durée du test de stabilité (secondes)"
+        default: "60"
+      listen_events:
+        description: "Secondes d'écoute des events entrants (0 = ignoré ; envoyer un message au bot pendant le run)"
+        default: "0"
+
+jobs:
+  ws-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install WS client dependency
+        run: pip install "websockets>=12"
+
+      - name: Build and start bridge
+        run: docker compose up -d --build
+
+      - name: Wait for port 5225
+        run: |
+          for i in $(seq 1 90); do
+            if timeout 2 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/5225' 2>/dev/null; then
+              echo "Port 5225 prêt après ${i} tentatives"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Port 5225 injoignable après 180 s"
+          docker compose logs --no-color
+          exit 1
+
+      - name: Run WebSocket validation suite
+        env:
+          DURATION: ${{ inputs.duration || 60 }}
+          LISTEN_EVENTS: ${{ inputs.listen_events || 0 }}
+        run: |
+          python3 tests/ws-validate.py \
+            --url ws://127.0.0.1:5225 \
+            --duration "$DURATION" \
+            --listen-events "$LISTEN_EVENTS"
+
+      - name: Export bridge logs
+        if: always()
+        run: docker compose logs --no-color --timestamps > bridge-logs.txt || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-logs
+          path: bridge-logs.txt
+          if-no-files-found: ignore
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v --remove-orphans

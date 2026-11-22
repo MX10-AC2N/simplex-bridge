@@ -17,8 +17,13 @@ Appairage interactif (UN SEUL RUN, aucune fenêtre à synchroniser) :
      (Add contact → paste link) pendant que le run attend ;
   4. le bot détecte le contact, envoie « ping de validation » (vous le recevez) ;
   5. RÉPONDEZ depuis votre téléphone PENDANT LE COMPTE À REBOURS (90 s) :
-     le listener capture newChatItems (direction Rcv) et T09 valide les
-     champs CLI que HA consomme (itemId, chatDir, msgContent).
+     chaque message reçu (texte, photo, vidéo, fichier) est affiché EN DIRECT
+     dans le log avec sa direction CLI (directRcv) et son type de contenu,
+     et T09 valide les champs CLI que HA consomme (itemId, chatDir, msgContent).
+
+IMPORTANT : répondez pendant le run. Un message envoyé APRÈS la fin du run
+part vers un bot dont le volume vient d'être détruit (down -v) : il n'arrivera
+nulle part. Les messages reçus pendant le run, eux, sont prouvés dans le log.
 
 NB : le live-tail des logs GitHub Actions duplique parfois les lignes pendant
 le streaming — c'est un artefact d'affichage, pas une sortie réelle du script.
@@ -128,17 +133,6 @@ def resp_obj(data):
     return {}
 
 
-def resp_text(data):
-    """Aplati une réponse RPC en texte pour analyse heuristique."""
-    if not isinstance(data, dict):
-        return ""
-    resp = data.get("resp", data)
-    try:
-        return json.dumps(resp, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(resp)
-
-
 def is_chat_error(data):
     """Détecte une erreur métier du CLI (chatCmdError)."""
     return resp_obj(data).get("type") == "chatCmdError"
@@ -176,24 +170,66 @@ def find_keys(o, acc=None):
     return acc
 
 
-def event_type(raw):
-    """Type d'événement CLI d'une frame (ex: newChatItems, contactConnected)."""
+# ------------------------------------------------- analyse des événements CLI
+
+def parse_event(raw):
+    """Décode une frame d'événement CLI :
+    retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set}
+    ou None si la frame n'est pas un événement exploitable.
+    Chaque résumé de chatItem contient direction (chatDir.type), kind
+    (msgContent.type), item_id, text_preview — exactement les primitives
+    que l'intégration HA dérive pour alias/chat_ref/text/direction/item_id."""
     try:
         obj = json.loads(raw)
     except (ValueError, TypeError):
         return None
     resp = obj.get("resp") if isinstance(obj, dict) else None
-    if isinstance(resp, dict):
-        return resp.get("type")
-    return None
+    if not isinstance(resp, dict):
+        return None
+    out = {"type": resp.get("type"), "items": [], "raw_keys": set()}
+    find_keys(resp, out["raw_keys"])
+
+    if out["type"] == "newChatItems":
+        items = resp.get("chatItems") or []
+        if not isinstance(items, list):
+            items = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # CLI v7 : chatItems[].chatItem.{meta.chatDir, msgContent}
+            chat_item = it.get("chatItem") if isinstance(it.get("chatItem"), dict) else it
+            meta = chat_item.get("meta") if isinstance(chat_item.get("meta"), dict) else {}
+            chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else \
+                       (chat_item.get("chatDir") if isinstance(chat_item.get("chatDir"), dict) else {})
+            direction = chat_dir.get("type") or "?"
+            mc = chat_item.get("msgContent") if isinstance(chat_item.get("msgContent"), dict) else {}
+            kind = mc.get("type") or "?"
+            text = mc.get("text") or mc.get("fileName") or mc.get("caption") or ""
+            item_id = meta.get("itemId") or chat_item.get("itemId") or "?"
+            out["items"].append({
+                "direction": str(direction),
+                "kind": str(kind),
+                "item_id": item_id,
+                "text_preview": str(text)[:80],
+            })
+    return out
 
 
-def event_is_incoming_msg(raw):
-    """Vrai si la frame est un newChatItems contenant un message REÇU du pair
-    (chatDir directRcv) avec du contenu — l'équivalent CLI de direction=incoming."""
-    if '"directRcv"' not in raw and '"directR"' not in raw:
-        return False
-    return "msgContent" in raw or '"text"' in raw
+def event_incoming_items(raw):
+    """Résumés des chatItems RECUS (directRcv) d'une frame newChatItems."""
+    ev = parse_event(raw)
+    if not ev or ev["type"] != "newChatItems":
+        return []
+    return [i for i in ev["items"] if i["direction"].lower().startswith("directrcv")]
+
+
+def summarize_event_types(events):
+    types = {}
+    for raw in events:
+        ev = parse_event(raw)
+        t = ev["type"] if ev else "<non-json>"
+        types[t] = types.get(t, 0) + 1
+    return ", ".join(f"{k}×{v}" for k, v in sorted(types.items()))
 
 
 def publish_invite_link(link):
@@ -499,7 +535,8 @@ async def test_t12_pairing_and_send(results):
       2. sinon le bot génère son propre lien (ligne « INVITE LINK: … », une fois) ;
       3. contact établi → envoie « ping de validation » (vous le recevez) ;
       4. COMPTE À REBOURS affiché toutes les 10 s pendant l'attente de votre
-         message retour (newChatItems, direction Rcv)."""
+         message retour : chaque message reçu (texte/image/vidéo/fichier)
+         est affiché EN DIRECT dans le log."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         recipient = None
         notes = []
@@ -544,7 +581,7 @@ async def test_t12_pairing_and_send(results):
             return
 
         # --- envoi du ping (service send_message / notify.* / LLM)
-        sent_ok, sent_raw = await rpc(
+        sent_ok, sent_data = await rpc(
             ws, f"@{recipient} ping de validation ws-validate.py"
         )
         if not sent_ok:
@@ -552,99 +589,115 @@ async def test_t12_pairing_and_send(results):
                 " ; ".join(notes) + f" — ping sans réponse corrélée vers @{recipient}"
             )
             return
-        if is_chat_error(sent_raw):
+        if is_chat_error(sent_data):
             results["t12"].warn(
                 " ; ".join(notes)
-                + f" — ping rejeté par le CLI : {chat_error_message(sent_raw)}"
+                + f" — ping rejeté par le CLI : {chat_error_message(sent_data)}"
             )
             return
         notes.append(f"ping envoyé à @{recipient} (vérifiez la réception sur le téléphone)")
 
-        # --- attente du message retour avec compte à rebours visible
-        events_before = len(EVENTS)
-        deadline = time.monotonic() + ARGS.incoming_wait
+        # --- attente du message retour avec compte à rebours VISIBLE
+        window = ARGS.incoming_wait
+        deadline = time.monotonic() + window
         print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
-              f"(fenêtre de {ARGS.incoming_wait} s — le compte à rebours s'affiche)",
+              f"(fenêtre de {window} s — décompte affiché toutes les 10 s)",
               flush=True)
         got_reply = False
-        next_tick = 0
+        received_notes = []
+        last_mark = None
         while time.monotonic() < deadline:
-            if any(event_is_incoming_msg(e) for e in EVENTS[events_before:]):
-                got_reply = True
+            # tout événement newChatItems apparu depuis le début de la fenêtre
+            ev = parse_event(EVENTS[-1]) if EVENTS else None
+            for raw in [e for e in EVENTS]:
+                items = event_incoming_items(raw)
+                for i in items:
+                    key = (i["item_id"], i["direction"])
+                    if key not in {(r[0], r[1]) for r in received_notes}:
+                        received_notes.append((i["item_id"], i["direction"], i["kind"], i["text_preview"]))
+                        print(f"   📥 message reçu du téléphone ! direction={i['direction']} "
+                              f"contenu={i['kind']} extrait={i['text_preview']!r}", flush=True)
+                        got_reply = True
+            if got_reply:
                 break
             remaining = int(deadline - time.monotonic())
-            if remaining <= next_tick:
+            mark = (remaining // 10) * 10
+            if mark != last_mark and remaining > 0:
                 print(f"   ⏳ {remaining} s pour répondre au ping depuis le téléphone…",
                       flush=True)
-                next_tick -= 10
+                last_mark = mark
             await asyncio.sleep(1)
         if got_reply:
-            notes.append("message retour reçu du téléphone (newChatItems, direction Rcv)")
+            notes.append("message(s) retour reçu(s) du téléphone (directRcv) : "
+                         + "; ".join(f"[{k}] {p!r}" for _, _, k, p in received_notes))
             results["t12"].ok(" ; ".join(notes))
         else:
             notes.append(
-                "aucun message retour pendant le compte à rebours — répondez au ping "
-                "dès l'affichage « RÉPONDEZ MAINTENANT », vous verrez le décompte"
+                f"aucun message retour pendant la fenêtre de {window} s — répondez au ping "
+                "dès l'affichage « RÉPONDEZ MAINTENANT » (le décompte s'affiche). "
+                "ATTENTION : un message envoyé après la fin du run va vers un bot dont "
+                "le volume a été détruit — il ne peut pas être reçu."
             )
             results["t12"].warn(" ; ".join(notes))
 
 
 async def test_t09_eval_events(results):
     """T09 — Évaluation du flux entrant capturé par le listener pendant toute
-    la suite. NB : alias/direction/text/item_id du CÔTÉ HA sont dérivés par
-    l'intégration à partir des événements CLI natifs — on vérifie donc les
-    primitives CLI que HA consomme :
+    la suite. Vérifie les primitives CLI que HA consomme :
       - événements de cycle de contact (contactConnecting/contactConnected) ;
-      - newChatItems contenant chatItem avec meta.itemId, chatDir, msgContent.
-    Un message REÇU (directRcv) validé ici = event simplex_message_received +
-    sensor last_message garantis côté HA."""
+      - newChatItems avec chatItem.meta.itemId, chatDir, msgContent ;
+      - au moins un message REÇU (chatDir directRcv) = event
+        simplex_message_received + sensor last_message garantis côté HA.
+    Affiche un résumé lisible de chaque chatItem (direction, type, extrait)."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
             "n'a circulé, soit le flux entrant est cassé (à investiguer)"
         )
         return
-    types = {}
-    keys_seen = set()
+    type_summary = summarize_event_types(EVENTS)
+    item_lines = []
+    directions_seen = set()
+    kinds_seen = set()
+    fields_seen = set()
     for raw in EVENTS:
-        t = event_type(raw)
-        if t:
-            types[t] = types.get(t, 0) + 1
-        try:
-            find_keys(json.loads(raw), keys_seen)
-        except (ValueError, TypeError):
-            pass
-    type_summary = ", ".join(f"{k}×{v}" for k, v in sorted(types.items()))
-    sample = "\n---\n".join(e[:250] for e in EVENTS[:4])
+        ev = parse_event(raw)
+        if not ev:
+            continue
+        fields_seen |= ev["raw_keys"]
+        for i in ev["items"]:
+            directions_seen.add(i["direction"])
+            kinds_seen.add(i["kind"])
+            item_lines.append(
+                f"chatItem: direction={i['direction']} contenu={i['kind']} "
+                f"itemId={i['item_id']} extrait={i['text_preview']!r}"
+            )
 
-    has_contact_cycle = any(t in types for t in ("contactConnected", "contactConnecting"))
-    has_chat_items = "newChatItems" in types
-    item_fields = {"itemId", "chatDir", "msgContent"} & keys_seen
-    incoming_msg = any(event_is_incoming_msg(e) for e in EVENTS)
+    has_chat_items = "newChatItems" in summarize_event_types(EVENTS)
+    has_incoming = any(d.lower().startswith("directrcv") for d in directions_seen)
+    item_fields = {"itemId", "chatDir", "msgContent"} & fields_seen
+    sample = "\n".join(item_lines[:10]) or "(aucun chatItem dans les événements capturés)"
 
-    if has_chat_items and incoming_msg and len(item_fields) == 3:
+    if has_chat_items and has_incoming and len(item_fields) == 3:
         results["t09"].ok(
-            f"{len(EVENTS)} événements [{type_summary}] — message entrant validé : "
-            f"newChatItems avec itemId/chatDir/msgContent (équivalent CLI de "
-            f"alias/chat_ref/text/direction/item_id de HA) :\n{sample}"
+            f"{len(EVENTS)} événements [{type_summary}] — message(s) ENTRANT validés "
+            f"(directRcv), contenus vus : {', '.join(sorted(kinds_seen))}. Champs CLI "
+            f"itemId/chatDir/msgContent présents (base des alias/chat_ref/text/"
+            f"direction/item_id de HA) :\n{sample}"
         )
     elif has_chat_items and len(item_fields) == 3:
         results["t09"].warn(
-            f"{len(EVENTS)} événements [{type_summary}] — newChatItems et champs "
-            f"CLI présents ({', '.join(sorted(item_fields))}) mais aucun message "
-            "entrant (directRcv) : répondez au ping pendant le compte à rebours "
-            "de T12 pour valider le sens incoming :\n" + sample
-        )
-    elif has_contact_cycle:
-        results["t09"].warn(
-            f"{len(EVENTS)} événements [{type_summary}] — cycle de connexion "
-            "capturé mais aucun message (normale si personne n'a écrit au bot) :\n"
+            f"{len(EVENTS)} événements [{type_summary}] — newChatItems et champs CLI "
+            f"présents ({', '.join(sorted(item_fields))}) ; directions vues : "
+            f"{', '.join(sorted(directions_seen))} ; mais aucun directRcv : répondez au "
+            "ping pendant le compte à rebours de T12 pour valider le sens incoming :\n"
             + sample
         )
     else:
         results["t09"].warn(
-            f"{len(EVENTS)} événements [{type_summary}] — types inattendus, "
-            "comparer au format attendu par l'intégration :\n" + sample
+            f"{len(EVENTS)} événements [{type_summary}] — cycle de connexion capturé "
+            "mais aucun chatItem exploitable (normale si personne n'a écrit au bot "
+            "pendant le run) :\n" + sample
         )
 
 

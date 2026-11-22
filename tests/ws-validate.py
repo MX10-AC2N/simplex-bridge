@@ -117,12 +117,18 @@ async def probe_protocol(ws):
 
 async def test_t01_connect(results):
     """T01 — Connexion WebSocket et handshake."""
+    # NB : entrer dans le context manager lève une exception si le handshake échoue ;
+    # on ne vérifie PAS l'attribut `.open`, supprimé de websockets >= 14
+    # (ClientConnection). Compatible toutes versions.
     try:
         async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
-            if not ws.open:
-                results["t01"].fail("socket fermée immédiatement après l'ouverture")
-                return False
-            results["t01"].ok(f"connecté à {ARGS.url}")
+            # test de vivacité : une réception avec timeout court ne doit pas échouer
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=1.0)
+                idle = "socket vive (message spontané reçu)"
+            except asyncio.TimeoutError:
+                idle = "socket ouverte, silencieuse en l'absence de commande (attendu)"
+            results["t01"].ok(f"connecté à {ARGS.url} — {idle}")
             return True
     except Exception as e:
         results["t01"].fail(f"connexion impossible : {e}")

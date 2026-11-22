@@ -98,7 +98,7 @@ jobs:
         run: docker compose config --quiet
 
       - name: Run container with compose security options
-        run: 
+        run: |
           docker volume create simplex-smoke-data
           docker volume create simplex-smoke-inbox
           docker volume create simplex-smoke-outbox
@@ -171,8 +171,8 @@ jobs:
         if: always()
         run: |
           docker rm -f simplex-smoke 2>/dev/null || true
-          docker volume rm simplex-smoke-data 2>/dev/null || true
-
+          docker volume rm simplex-smoke-data simplex-smoke-inbox simplex-smoke-outbox 2>/dev/null || true
+        
   build:
     name: Build and publish
     runs-on: ubuntu-latest

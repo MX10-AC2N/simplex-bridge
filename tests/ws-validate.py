@@ -14,8 +14,10 @@ Usage :
   python3 ws-validate.py --url ws://127.0.0.1:5225 --summary "$GITHUB_STEP_SUMMARY"
   python3 ws-validate.py --url ws://127.0.0.1:5225 --probe-cmds "/help,/contacts,/version"
   python3 ws-validate.py --url ws://127.0.0.1:5225 --listen-events 30
-  # Pour un test réel d'acceptation d'invitation (lien depuis votre téléphone) :
-  python3 ws-validate.py --url ws://127.0.0.1:5225 --invite-link "https://simplex.im/..."
+  # Test complet avec une VRAIE invitation créée sur votre téléphone :
+  #   1. créez un lien d'invitation sur votre téléphone (l'app doit rester ouverte) ;
+  #   2. lancez : python3 ws-validate.py --invite-link "https://simplex.im/i#..."
+  # Le bot accepte le lien, attend l'établissement du contact, puis envoie un message.
 
 Codes de sortie : 0 = tout passé, 1 = au moins un échec.
 """
@@ -391,56 +393,77 @@ async def test_t11_create_invite(results):
             )
 
 
+async def wait_for_contact(ws, wait_s):
+    """Sonde /contacts régulièrement jusqu'à ce qu'un contact apparaisse
+    (la connexion via lien d'invitation est asynchrone : confirmation via SMP).
+    Retourne le nom du premier contact ou None."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        data, _ = await rpc(ws, "/contacts")
+        names = extract_contacts(data) if data else []
+        if names:
+            return names[0]
+        # évite de marteler le CLI pendant l'attente
+        await asyncio.sleep(min(3, max(1, wait_s // 10)))
+    return None
+
+
 async def test_t12_accept_and_send(results):
     """T12 — Services HA « accept_invite » + « send_message ».
     Acceptation d'invitation :
-      - avec --invite-link <url> : accepte une VRAIE invitation (depuis un
-        autre appareil) — validation en conditions réelles ;
+      - avec --invite-link <url> : accepte une VRAIE invitation créée sur votre
+        téléphone (gardez l'app ouverte !), puis SONDE /contacts jusqu'à
+        l'établissement du contact avant l'envoi — validation en conditions réelles ;
       - sinon, tente l'auto-connexion avec le lien de T11 : la corrélation est
         validée mais une erreur CLI (chatCmdError) est attendue et signalée
         sans faire échouer le run (l'auto-connexion bot→bot est un cas dégénéré).
-    Envoi de message : @<contact> <texte>, comme notify.* / send_message / LLM.
-    """
+    Envoi de message : @<contact> <texte>, comme notify.* / send_message / LLM."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
-        # --- 1) acceptation d'invitation (service accept_invite)
         invite = ARGS.invite_link or PROBE.get("last_invite")
-        mode_label = "lien fourni (--invite-link)" if ARGS.invite_link else "auto-connexion bot→bot"
-        accepted = None
+        real_link = bool(ARGS.invite_link)
+        mode_label = "lien réel (--invite-link)" if real_link else "auto-connexion bot→bot"
+        connect_note = ""
+        recipient = None
+
         if invite:
             data, raw = await rpc(ws, f"/connect {invite}", timeout=ARGS.timeout * 2)
             if data is None:
-                accepted = False
-                results_part = f"accept_invite [{mode_label}] : pas de réponse corrélée"
+                connect_note = f"accept_invite [{mode_label}] : pas de réponse corrélée"
             elif is_chat_error(data):
-                accepted = False
-                results_part = (
+                connect_note = (
                     f"accept_invite [{mode_label}] : erreur CLI (corrélation OK) — "
                     f"{chat_error_message(data)}"
                 )
             else:
-                accepted = True
-                results_part = f"accept_invite [{mode_label}] : accepté ({raw[:150]})"
+                connect_note = f"accept_invite [{mode_label}] : commande acceptée par le CLI"
+                if real_link:
+                    # la connexion s'établit de façon asynchrone : on sonde
+                    recipient = await wait_for_contact(ws, ARGS.contact_wait)
+                    if recipient:
+                        connect_note += f" — contact établi : {recipient}"
+                    else:
+                        connect_note += (
+                            f" — aucun contact établi en {ARGS.contact_wait} s "
+                            "(l'app du téléphone était-elle ouverte/online ?)"
+                        )
         else:
-            results_part = "accept_invite ignoré (aucun lien disponible)"
+            connect_note = "accept_invite ignoré (aucun lien disponible)"
 
-        # --- 2) envoi de message (service send_message / notify.*)
-        data, raw = await rpc(ws, "/contacts")
-        names = extract_contacts(data) if data else []
-        if not names:
-            # fallback heuristique : @handle dans la réponse brute
-            m = re.search(r"@([\w-]{2,})", resp_text(data))
-            recipient = m.group(1) if m else None
-        else:
-            recipient = names[0]
+        # --- envoi de message (service send_message / notify.*)
+        if not recipient:
+            data, raw = await rpc(ws, "/contacts")
+            names = extract_contacts(data) if data else []
+            recipient = names[0] if names else None
         if not recipient:
             extra = ""
-            if accepted is False and not ARGS.invite_link:
+            if not real_link:
                 extra = (
-                    " Astuce : fournir un vrai lien via --invite-link (depuis un autre "
-                    "appareil SimpleX) pour tester accept + send en conditions réelles."
+                    " Astuce : lancez le workflow via « Run workflow » en collant un "
+                    "lien d'invitation créé sur votre téléphone dans le champ "
+                    "invite_link (app ouverte pendant le run)."
                 )
             results["t12"].warn(
-                f"{results_part} — envoi non testé : aucun contact disponible.{extra}"
+                f"{connect_note} — envoi non testé : aucun contact disponible.{extra}"
             )
             return
         sent_ok, sent_raw = await rpc(
@@ -449,23 +472,24 @@ async def test_t12_accept_and_send(results):
         if sent_ok:
             if is_chat_error(sent_raw):
                 results["t12"].warn(
-                    f"{results_part} — envoi à @{recipient} rejeté : {chat_error_message(sent_raw)}"
+                    f"{connect_note} — envoi à @{recipient} rejeté : {chat_error_message(sent_raw)}"
                 )
             else:
                 results["t12"].ok(
-                    f"{results_part} — message envoyé à @{recipient}, réponse : {sent_raw[:200]}"
+                    f"{connect_note} — message envoyé à @{recipient}, réponse : {sent_raw[:200]}"
                 )
         else:
             results["t12"].warn(
-                f"{results_part} — envoi sans réponse corrélée vers @{recipient}"
+                f"{connect_note} — envoi sans réponse corrélée vers @{recipient}"
             )
 
 
 async def test_t09_listen_events(results):
     """T09 — Écoute passive des événements entrants (--listen-events N secondes).
     Valide le flux utilisé par l'event simplex_message_received et le sensor
-    last_message. Idéalement : envoyer un message au bot depuis un client SimpleX
-    pendant la fenêtre d'écoute."""
+    last_message. Idéalement : envoyer un message au bot depuis votre téléphone
+    pendant la fenêtre d'écoute (surtout juste après l'établissement du contact
+    via --invite-link)."""
     if ARGS.listen_events <= 0:
         results["t09"].warn("ignoré (passer --listen-events N et envoyer un message au bot)")
         return
@@ -579,7 +603,9 @@ async def main():
     parser.add_argument("--listen-events", type=int, default=0,
                         help="secondes d'écoute passive des événements entrants (0 = ignoré)")
     parser.add_argument("--invite-link", default=os.environ.get("SIMPLEX_INVITE_LINK"),
-                        help="vrai lien d'invitation SimpleX pour tester accept_invite en conditions réelles")
+                        help="vrai lien d'invitation SimpleX (créé sur votre téléphone) pour accept_invite")
+    parser.add_argument("--contact-wait", type=int, default=60,
+                        help="secondes max d'attente de l'établissement du contact après /connect (défaut 60)")
     parser.add_argument("--skip", default="", help="tests à ignorer, ex: t08,t12")
     parser.add_argument("--summary", default=None, help="fichier pour le résumé markdown (CI)")
     global ARGS

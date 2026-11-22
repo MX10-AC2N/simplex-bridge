@@ -16,10 +16,31 @@ Appairage interactif (UN SEUL RUN, aucune fenêtre à synchroniser) :
   3. ouvrez ce lien dans l'app SimpleX de votre téléphone
      (Add contact → paste link) pendant que le run attend ;
   4. le bot détecte le contact, envoie « ping de validation » (vous le recevez) ;
-  5. RÉPONDEZ depuis votre téléphone PENDANT LE COMPTE À REBOURS (90 s) :
-     les items protocolaires automatiques (banner E2EE, négociation de
-     features) sont filtrés — seuls vos VRAIS messages (texte, photo, vidéo,
-     fichier) sont affichés EN DIRECT et comptent comme réponse.
+  5. RÉPONDEZ dans le fil qui vient de RECEVOIR LE PING (créé à l'instant).
+     Les items protocolaires automatiques (banner E2EE, features) sont filtrés ;
+     seuls vos VRAIS messages (texte, photo, vidéo, fichier) sont affichés
+     EN DIRECT et comptent comme réponse.
+
+⚠️ SÉMANTIQUE DE LA DOUBLE COCHE (source : FAQ officielle SimpleX) :
+  « one checkmark - message is delivered to the relay (the server);
+    two checkmarks - message is delivered to the recipient's device ».
+  La double coche = le bot du run EN COURS a reçu et stocké le message.
+  Un ancien bot (volume détruit) ne peut ni récupérer ni accuser réception.
+  Donc si vos messages partent avec une double coche mais n'apparaissent pas
+  dans le log, c'est qu'ils sont arrivés HORS des fenêtres observées :
+  - pendant la fenêtre T12 (45/90 s) → affichés en direct ;
+  - pendant T08 (stabilité, 60 s) → également affichés en direct (v6.x) ;
+  - T09 est évalué EN TOUT DERNIER : il couvre absolument tout le run.
+  Vous avez donc ~2 min après le ping pour répondre, avec affichage en direct.
+
+⚠️ FILOSOPHIE DU TEST :
+  - Chaque run crée une identité de bot NEUVE (« SimpleX Bridge »). Votre app
+    peut contenir PLUSIEURS fils de ce nom (un par ancien run). Répondre dans
+    un ancien fil = message stocké sur les serveurs SMP d'un bot mort
+    (une seule coche, pas de double coche). → Répondez TOUJOURS dans le fil
+    qui vient de recevoir le ping.
+  - Un message envoyé APRÈS la fin du run (teardown `down -v`) ne peut pas
+    être reçu : plus aucun client n'accuse réception.
 
 Structure CLI v7 établie par les runs (cartographie réelle) :
   newChatItems.chatItems[] = {
@@ -31,13 +52,11 @@ Structure CLI v7 établie par les runs (cartographie réelle) :
       "content": {"type": "chatBanner"|"rcvDirectE2EEInfo"|"rcvChatFeature"
                   |"text"|"image"|"video"|"file"|...}
     }}
-  NB : les types chatBanner/rcvDirectE2EEInfo/rcvChatFeature/... sont des
-  items SYSTÈME générés à la connexion, pas des messages utilisateur.
+  Doc protocole officielle (simplex-chat.md) : les objets de conversation sont
+  des « chat items » ; le contenu utilisateur est de type text/file/image/
+  video/voice/link. Les types chatBanner/rcvDirectE2EEInfo/rcvChatFeature/...
+  sont des items SYSTÈME générés à la connexion, pas des messages utilisateur.
   Le texte réel est dans meta.itemText (source la plus fiable en v7).
-
-IMPORTANT : répondez pendant le run. Un message envoyé APRÈS la fin du run
-part vers un bot dont le volume vient d'être détruit (down -v) : il n'arrivera
-nulle part. Les messages reçus pendant le run, eux, sont prouvés dans le log.
 
 NB : le live-tail des logs GitHub Actions duplique parfois les lignes pendant
 le streaming — c'est un artefact d'affichage, pas une sortie réelle du script.
@@ -95,19 +114,17 @@ SYSTEM_CONTENT_TYPES = {
     "groupInvitation", "autoReply", "delete", "deleted",
 }
 
-# Types de contenu considérés comme de vrais messages utilisateur (v7).
-# Un type inconnu hors de la liste système est aussi considéré utilisateur
-# (tolérance aux futures versions) — signalé en info.
-USER_CONTENT_HINTS = {"text", "image", "video", "file", "voice", "audio", "link"}
-
 
 def is_user_content(kind):
-    """Vrai si le type de contenu correspond à un message utilisateur réel."""
+    """Vrai si le type de contenu correspond à un message utilisateur réel.
+    Doc protocole : les contenus utilisateur sont text/file/image/video/voice/
+    link (+ types futurs) ; tout ce qui n'est pas système est traité comme
+    utilisateur potentiel."""
     if not kind or kind == "?":
         return False
     if kind in SYSTEM_CONTENT_TYPES:
         return False
-    return True  # tout ce qui n'est pas système = potentiellement utilisateur
+    return True
 
 
 # ---------------------------------------------------------------- helpers
@@ -323,7 +340,8 @@ def publish_invite_link(link):
                     "## 🔗 Appairage interactif (T12)\n\n"
                     "Ouvrez ce lien dans l'app SimpleX de votre téléphone "
                     "**pendant que le run tourne**, puis répondez au ping pendant "
-                    "le compte à rebours :\n\n```\n"
+                    "le compte à rebours (et jusqu'à ~2 min après : T08 continue "
+                    "d'afficher les messages reçus en direct) :\n\n```\n"
                     f"{link}\n```\n"
                 )
         except OSError:
@@ -357,6 +375,36 @@ async def stop_listener():
         except (asyncio.CancelledError, Exception):
             pass
         LISTENER_TASK = None
+
+
+def poll_user_replies(seen_keys):
+    """Parcourt EVENTS à la recherche de NOUVEAUX messages utilisateur entrants
+    (directRcv non-système) non encore vus. Affiche chacun en direct et
+    retourne la liste des nouveaux. Utilisé par T12 ET T08 — un message reçu
+    pendant la stabilité longue est donc visible et compté (T09 évalue
+    finalement TOUS les événements en fin de run)."""
+    new_items = []
+    for raw in EVENTS:
+        ev = parse_event(raw)
+        if not ev or ev["type"] != "newChatItems":
+            continue
+        for i in ev["items"]:
+            if not i["direction"].lower().startswith("directrcv"):
+                continue
+            if not i["user_kind"]:
+                # item système : dédupliqué pour ne compter qu'une fois
+                key = (i["item_id"], "sys")
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                continue
+            key = (i["item_id"], i["direction"], i["text_preview"], i["kind"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                new_items.append(i)
+                print(f"   📥 VRAI MESSAGE reçu du téléphone ! de=@{i['contact']} "
+                      f"contenu={i['kind']} itemId={i['item_id']} "
+                      f"texte={i['text_preview']!r}", flush=True)
+    return new_items
 
 
 async def probe_protocol(ws):
@@ -609,7 +657,10 @@ async def test_t12_pairing_and_send(results):
       4. COMPTE À REBOURS affiché toutes les 10 s pendant l'attente de votre
          message retour. Les items système (banner E2EE, features) sont
          FILTRÉS : seule une vraie réponse utilisateur (texte/photo/vidéo/
-         fichier) clôt la fenêtre."""
+         fichier) clôt la fenêtre. Un compteur d'événements s'affiche toutes
+         les 10 s pour voir le flux entrant battre en direct.
+    NB : si vous répondez un peu tard, pas de panique — la détection continue
+    pendant T08 et T09 évalue la totalité des événements en fin de run."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         recipient = None
         notes = []
@@ -673,60 +724,52 @@ async def test_t12_pairing_and_send(results):
         # --- attente d'une VRAIE réponse utilisateur, avec compte à rebours
         window = ARGS.incoming_wait
         deadline = time.monotonic() + window
-        print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
-              f"(fenêtre de {window} s — décompte affiché toutes les 10 s ; "
-              f"les items système de connexion sont ignorés)",
-              flush=True)
-        got_reply = False
+        print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone, DANS LE FIL QUI "
+              f"VIENT DE RECEVOIR LE PING (fil créé à l'instant — PAS un ancien fil "
+              f"« SimpleX Bridge » d'un run précédent) !", flush=True)
+        print(f"   >>> fenêtre de {window} s — décompte toutes les 10 s ; les items "
+              f"système de connexion sont ignorés ; les messages arrivant plus tard "
+              f"(pendant T08) restent affichés et comptés par T09", flush=True)
         seen_keys = set()
         received_notes = []
-        system_count = 0
+        got_reply = False
         last_mark = None
         while time.monotonic() < deadline:
-            for raw in EVENTS:
-                ev = parse_event(raw)
-                if not ev or ev["type"] != "newChatItems":
-                    continue
-                for i in ev["items"]:
-                    if i["direction"].lower().startswith("directrcv") and not i["user_kind"]:
-                        # item système : compté pour info, jamais traité comme réponse
-                        key = (i["item_id"], "sys")
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            system_count += 1
-                        continue
-                    if not i["direction"].lower().startswith("directrcv"):
-                        continue
-                    key = (i["item_id"], i["direction"], i["text_preview"], i["kind"])
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        received_notes.append((i["item_id"], i["contact"], i["kind"], i["text_preview"]))
-                        print(f"   📥 VRAI MESSAGE reçu du téléphone ! de=@{i['contact']} "
-                              f"contenu={i['kind']} itemId={i['item_id']} "
-                              f"texte={i['text_preview']!r}", flush=True)
-                        got_reply = True
+            new_items = poll_user_replies(seen_keys)
+            for i in new_items:
+                received_notes.append((i["item_id"], i["contact"], i["kind"], i["text_preview"]))
+                got_reply = True
             if got_reply:
+                # on continue un peu pour capter d'éventuels messages supplémentaires
+                # (photo, vidéo, fichier envoyés en rafale) avant de clore
+                if not getattr(test_t12_pairing_and_send, "_drain_done", False):
+                    await asyncio.sleep(10)
+                    test_t12_pairing_and_send._drain_done = True
+                    continue
                 break
             remaining = int(deadline - time.monotonic())
             mark = (remaining // 10) * 10
             if mark != last_mark and remaining > 0:
-                print(f"   ⏳ {remaining} s pour répondre au ping depuis le téléphone…",
+                print(f"   ⏳ {remaining} s pour répondre (au fil qui vient de recevoir "
+                      f"le ping) — {len(EVENTS)} événement(s) capturé(s) jusqu'ici",
                       flush=True)
                 last_mark = mark
             await asyncio.sleep(1)
-        if system_count:
-            notes.append(f"{system_count} item(s) système de connexion filtrés "
-                         "(banner E2EE/features — non comptés comme réponse)")
+        test_t12_pairing_and_send._drain_done = False
         if got_reply:
             notes.append("message(s) retour reçu(s) du téléphone (directRcv, non-système) : "
                          + "; ".join(f"de=@{c} [{k}] {p!r}" for _, c, k, p in received_notes))
             results["t12"].ok(" ; ".join(notes))
         else:
             notes.append(
-                f"aucun vrai message retour pendant la fenêtre de {window} s — répondez au ping "
-                "dès l'affichage « RÉPONDEZ MAINTENANT » (le décompte s'affiche). "
-                "ATTENTION : un message envoyé après la fin du run va vers un bot dont "
-                "le volume a été détruit — il ne peut pas être reçu."
+                f"aucun vrai message retour pendant la fenêtre de {window} s. CE N'EST "
+                "PAS PERDANT SI VOUS RÉPONDEZ UN PEU TARD : la détection continue pendant "
+                "T08 (affichage 📥 en direct) et T09 évalue la TOTALITÉ des événements en "
+                "fin de run. Rappel double coche (FAQ SimpleX) : 2 coches = livré à "
+                "l'appareil du bot — donc si vous avez vu 2 coches, le message est arrivé "
+                "au bot du run en cours et sera compté par T09. Causes d'un message jamais "
+                "compté : réponse dans un ANCIEN fil « SimpleX Bridge » (1 coche seule) ou "
+                "après la fin du run (volume détruit)."
             )
             results["t12"].warn(" ; ".join(notes))
 
@@ -736,8 +779,7 @@ KEY_PATH_RE = re.compile(r"content|msg|text|file|image|video|caption|audio|itemT
 
 def collect_key_paths(o, prefix="$", acc=None):
     """Cartographie récursive : chemin (breadcrumb) de chaque clé dont le nom
-    ressemble à du contenu de message, avec aperçu de la valeur. Sert à
-    localiser où la version du CLI place réellement le corps du message."""
+    ressemble à du contenu de message, avec aperçu de la valeur."""
     if acc is None:
         acc = []
     if isinstance(o, dict):
@@ -757,8 +799,11 @@ def dump_event_diagnostics(raw):
     """Diagnostics complets d'une frame : cartographie des chemins de clés
     suspectes (contenu du message) + JSON intégral. Sort à la fois dans le
     log (stdout) et dans le Summary CI."""
-    ev = parse_event(raw)
-    paths = (ev or {}).get("raw_keys", set()) and collect_key_paths(json.loads(raw).get("resp", {})) or []
+    try:
+        resp = json.loads(raw).get("resp", {})
+    except (ValueError, TypeError, AttributeError):
+        resp = {}
+    paths = collect_key_paths(resp)
     lines = ["   🔍 CARTOGRAPHIE DES CLÉS DE CONTENU (chemin = valeur) :"]
     for p in paths[:40]:
         lines.append(f"      {p}")
@@ -779,16 +824,50 @@ def dump_event_diagnostics(raw):
             pass
 
 
+async def test_t08_stability_long_run(results):
+    """T08 — Stabilité : connexion maintenue, un RPC toutes les 5 s pendant
+    --duration s. Passé AVANT l'évaluation finale T09 : les messages qui
+    arrivent pendant cette phase sont affichés EN DIRECT (📥) et comptés
+    par T09 — c'est la période où aboutissent les réponses « un peu tard »
+    qui étaient invisibles dans les versions précédentes."""
+    duration = max(30, ARGS.duration)
+    async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
+        start = time.monotonic()
+        total, misses = 0, 0
+        seen_keys = set()
+        late_replies = 0
+        while time.monotonic() - start < duration:
+            total += 1
+            ok, _, _ = await roundtrip(ws)
+            if not ok:
+                misses += 1
+            # détection en direct des messages utilisateur arrivés pendant T08
+            late_replies += len(poll_user_replies(seen_keys))
+            await asyncio.sleep(5)
+        note = ""
+        if late_replies:
+            note = f" — {late_replies} message(s) utilisateur reçu(s) pendant cette phase (affichés ci-dessus en 📥)"
+        if misses == 0:
+            results["t08"].ok(f"{total} RPC sur {int(duration)} s sans perte{note}")
+        elif misses <= max(1, total // 10):
+            results["t08"].warn(f"{misses}/{total} RPC sans réponse (toléré){note}")
+        else:
+            results["t08"].fail(f"{misses}/{total} RPC sans réponse sur {int(duration)} s{note}")
+
+
 async def test_t09_eval_events(results):
-    """T09 — Évaluation du flux entrant capturé par le listener pendant toute
-    la suite, selon la structure CLI v7 établie par cartographie :
+    """T09 — Évaluation FINALE du flux entrant capturé par le listener pendant
+    TOUTE la suite (y compris pendant T08). Exécuté en tout dernier pour ne
+    rater aucun message. Selon la structure CLI v7 établie par cartographie :
       - contact cycle : contactConnecting/contactConnected ;
       - items système : chatBanner / rcvDirectE2EEInfo / rcvChatFeature…
         (normaux, listés pour info) ;
       - messages utilisateur : directRcv avec content.type non-système et
         meta.itemText → équivalent CLI de l'event simplex_message_received
         (alias=chatInfo.contact.localDisplayName, direction=chatDir,
-        text=itemText, item_id=meta.itemId)."""
+        text=itemText, item_id=meta.itemId).
+    Rappel double coche : 2 coches côté téléphone = message livré à l'appareil
+    du bot — il apparaîtra donc ICI, même s'il est arrivé hors fenêtre T12."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
@@ -801,6 +880,7 @@ async def test_t09_eval_events(results):
     system_kinds = set()
     fields_seen = set()
     first_newchatitems_raw = None
+    dumped = False
     for raw in EVENTS:
         ev = parse_event(raw)
         if not ev:
@@ -843,11 +923,22 @@ async def test_t09_eval_events(results):
             f"items système filtrés ({len(system_lines)}) : {', '.join(sorted(system_kinds))}"
         )
     elif has_chat_items and system_lines:
+        # directRcv système mais aucun message utilisateur : diagnostics complets
+        if not dumped and first_newchatitems_raw:
+            print("\n>>> T09 : aucun message utilisateur directRcv — dump diagnostique "
+                  "de la première frame newChatItems (pour vérifier la structure) :\n",
+                  flush=True)
+            dump_event_diagnostics(first_newchatitems_raw)
+            dumped = True
         results["t09"].warn(
             f"{len(EVENTS)} événements [{type_summary}] — connexion et items système "
             f"capturés ({', '.join(sorted(system_kinds))}), mais AUCUN vrai message "
-            "utilisateur directRcv : répondez au ping pendant le compte à rebours de "
-            "T12 (les items système ne ferment plus la fenêtre) :\n{system_sample}"
+            "utilisateur directRcv sur TOUT le run. Si votre téléphone affichait des "
+            "doubles coches sur vos réponses (FAQ SimpleX : 2 coches = livré à "
+            "l'appareil du bot), vérifiez que vous avez bien répondu dans le fil qui "
+            "vient de recevoir le ping (chaque run crée un NOUVEAU bot « SimpleX "
+            "Bridge » — plusieurs fils homonymes peuvent exister dans votre app) et "
+            f"AVANT la fin du run :\n{system_sample}"
         )
     else:
         results["t09"].warn(
@@ -855,27 +946,6 @@ async def test_t09_eval_events(results):
             "mais aucun chatItem exploitable (normale si personne n'a écrit au bot "
             "pendant le run)"
         )
-
-
-async def test_t08_stability_long_run(results):
-    """T08 — Stabilité : connexion maintenue, un RPC toutes les 5 s pendant --duration s.
-    Passé en dernier pour ne pas retarder l'appairage interactif."""
-    duration = max(30, ARGS.duration)
-    async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
-        start = time.monotonic()
-        total, misses = 0, 0
-        while time.monotonic() - start < duration:
-            total += 1
-            ok, _, _ = await roundtrip(ws)
-            if not ok:
-                misses += 1
-            await asyncio.sleep(5)
-        if misses == 0:
-            results["t08"].ok(f"{total} RPC sur {int(duration)} s sans perte")
-        elif misses <= max(1, total // 10):
-            results["t08"].warn(f"{misses}/{total} RPC sans réponse (toléré)")
-        else:
-            results["t08"].fail(f"{misses}/{total} RPC sans réponse sur {int(duration)} s")
 
 
 # ---------------------------------------------------------------- rapport
@@ -922,8 +992,8 @@ TESTS = {
     "t10": "T10 List contacts (service HA)",
     "t11": "T11 Create invite (service HA)",
     "t12": "T12 Appairage interactif + ping + attente réponse",
-    "t09": "T09 Flux entrant (capturé sur tout le run) + champs CLI pour HA",
     "t08": "T08 Stabilité longue durée",
+    "t09": "T09 Flux entrant (évalué en tout dernier, sur tout le run) + champs CLI pour HA",
 }
 
 
@@ -961,8 +1031,8 @@ async def main():
         "t10": test_t10_list_contacts,
         "t11": test_t11_create_invite,
         "t12": test_t12_pairing_and_send,
-        "t09": test_t09_eval_events,
         "t08": test_t08_stability_long_run,
+        "t09": test_t09_eval_events,
     }
 
     try:

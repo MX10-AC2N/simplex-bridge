@@ -11,14 +11,17 @@ plus la validation du flux d'événements entrants.
 
 Appairage interactif (UN SEUL RUN, aucune fenêtre à synchroniser) :
   1. lancez le workflow (ou : python3 ws-validate.py --url ws://127.0.0.1:5225) ;
-  2. dès que T12 démarre, le lien d'invitation du bot s'affiche UNE FOIS
-     dans les logs et dans le résumé (Summary) du run ;
+  2. dès que T12 démarre, le lien d'invitation du bot est affiché sur UNE
+     ligne « INVITE LINK: … » dans les logs et dans le Summary du run ;
   3. ouvrez ce lien dans l'app SimpleX de votre téléphone
      (Add contact → paste link) pendant que le run attend ;
   4. le bot détecte le contact, envoie « ping de validation » (vous le recevez) ;
-  5. RÉPONDEZ depuis votre téléphone pendant la fenêtre : le listener capture
-     l'événement CLI newChatItems (direction Rcv) et T09 vérifie les champs
-     que HA utilise (itemId, chatDir, msgContent.text).
+  5. RÉPONDEZ depuis votre téléphone PENDANT LE COMPTE À REBOURS (90 s) :
+     le listener capture newChatItems (direction Rcv) et T09 valide les
+     champs CLI que HA consomme (itemId, chatDir, msgContent).
+
+NB : le live-tail des logs GitHub Actions duplique parfois les lignes pendant
+le streaming — c'est un artefact d'affichage, pas une sortie réelle du script.
 
 Codes de sortie : 0 = tout passé, 1 = au moins un échec.
 """
@@ -60,7 +63,7 @@ class Result:
 PROBE = {"mode": None, "cmd": None, "last_invite": None, "contacts": []}
 EVENTS = []          # frames reçus sur la connexion d'écoute dédiée (toute la suite)
 LISTENER_TASK = None
-INVITE_PUBLISHED = False   # garde-fou : le lien ne doit s'afficher qu'UNE fois
+INVITE_PUBLISHED = False
 
 
 # ---------------------------------------------------------------- helpers
@@ -159,17 +162,17 @@ def extract_contacts(data):
     return names
 
 
-def find_keys(o, wanted, acc=None):
+def find_keys(o, acc=None):
     """Collecte récursivement les clés présentes dans un objet JSON."""
     if acc is None:
         acc = set()
     if isinstance(o, dict):
         for k, v in o.items():
             acc.add(k)
-            find_keys(v, wanted, acc)
+            find_keys(v, acc)
     elif isinstance(o, list):
         for v in o:
-            find_keys(v, wanted, acc)
+            find_keys(v, acc)
     return acc
 
 
@@ -187,27 +190,23 @@ def event_type(raw):
 
 def event_is_incoming_msg(raw):
     """Vrai si la frame est un newChatItems contenant un message REÇU du pair
-    (chatDir directRcv) avec du contenu texte — l'équivalent CLI du champ
-    direction=incoming utilisé par l'intégration HA."""
+    (chatDir directRcv) avec du contenu — l'équivalent CLI de direction=incoming."""
     if '"directRcv"' not in raw and '"directR"' not in raw:
         return False
     return "msgContent" in raw or '"text"' in raw
 
 
 def publish_invite_link(link):
-    """Affiche le lien d'invitation EN DIRECT (une seule fois) : logs + résumé CI."""
+    """Publie le lien d'invitation une seule fois : une ligne compacte dans les
+    logs + bloc dans le Summary. NB : le live-tail GitHub peut dupliquer les
+    lignes à l'affichage — le log archivé montre la sortie réelle."""
     global INVITE_PUBLISHED
     if INVITE_PUBLISHED:
         return
     INVITE_PUBLISHED = True
-    banner = (
-        "\n" + "=" * 64 + "\n"
-        ">>> LIEN D'INVITATION DU BOT — ouvrez-le dans l'app SimpleX\n"
-        ">>> de votre telephone MAINTENANT (Add contact → paste link)\n"
-        ">>> (le run attend l'établissement du contact)\n"
-        "=" * 64 + f"\n{link}\n" + "=" * 64 + "\n"
-    )
-    print(banner, flush=True)
+    print("\nINVITE LINK — ouvrez ce lien dans l'app SimpleX de votre téléphone "
+          "MAINTENANT (Add contact → paste link), le run attend :\n"
+          f"INVITE LINK: {link}\n", flush=True)
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         try:
@@ -215,7 +214,8 @@ def publish_invite_link(link):
                 f.write(
                     "## 🔗 Appairage interactif (T12)\n\n"
                     "Ouvrez ce lien dans l'app SimpleX de votre téléphone "
-                    "**pendant que le run tourne** :\n\n```\n"
+                    "**pendant que le run tourne**, puis répondez au ping pendant "
+                    "le compte à rebours :\n\n```\n"
                     f"{link}\n```\n"
                 )
         except OSError:
@@ -465,7 +465,6 @@ async def test_t11_create_invite(results):
         if m:
             link = m.group(0)
             PROBE["last_invite"] = link
-            # le lien court smpX.simplex.im/i#… doit s'arrêter avant tout caractère JSON
             clean = not any(ch in link for ch in '"\\}]{')
             results["t11"].ok(
                 f"create_invite OK — lien propre : {link[:100]}" if clean
@@ -487,7 +486,7 @@ async def wait_for_contact(ws, wait_s):
         names = extract_contacts(data) if data else []
         if names:
             return names[0]
-        print(f"   … en attente de l'appairage téléphone ↔ bot "
+        print(f"   … attente appairage téléphone ↔ bot "
               f"({int(deadline - time.monotonic())} s restantes)", flush=True)
         await asyncio.sleep(3)
     return None
@@ -497,10 +496,10 @@ async def test_t12_pairing_and_send(results):
     """T12 — Services HA « accept_invite » + « send_message », avec appairage
     interactif en un seul run :
       1. si --invite-link est fourni, le bot accepte ce lien réel ;
-      2. sinon le bot génère son propre lien d'invitation (propre, sans JSON),
-         l'affiche UNE FOIS (logs + Summary) et attend votre appairage ;
+      2. sinon le bot génère son propre lien (ligne « INVITE LINK: … », une fois) ;
       3. contact établi → envoie « ping de validation » (vous le recevez) ;
-      4. attend votre message retour (newChatItems, direction Rcv)."""
+      4. COMPTE À REBOURS affiché toutes les 10 s pendant l'attente de votre
+         message retour (newChatItems, direction Rcv)."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         recipient = None
         notes = []
@@ -531,7 +530,7 @@ async def test_t12_pairing_and_send(results):
                 m = LINK_RE.search(raw)
                 if m:
                     publish_invite_link(m.group(0))
-                    notes.append("lien d'invitation publié (une fois, logs + Summary)")
+                    notes.append("lien d'invitation publié (logs + Summary)")
                     recipient = await wait_for_contact(ws, ARGS.contact_wait)
                 else:
                     notes.append("aucun lien dans la réponse /connect : " + raw[:200])
@@ -561,23 +560,33 @@ async def test_t12_pairing_and_send(results):
             return
         notes.append(f"ping envoyé à @{recipient} (vérifiez la réception sur le téléphone)")
 
-        # --- attente du message retour (flux entrant, direction Rcv uniquement :
-        # l'écho du ping sortant ne compte pas)
+        # --- attente du message retour avec compte à rebours visible
         events_before = len(EVENTS)
-        print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
-              f"(fenêtre de {ARGS.incoming_wait} s)", flush=True)
         deadline = time.monotonic() + ARGS.incoming_wait
+        print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
+              f"(fenêtre de {ARGS.incoming_wait} s — le compte à rebours s'affiche)",
+              flush=True)
+        got_reply = False
+        next_tick = 0
         while time.monotonic() < deadline:
             if any(event_is_incoming_msg(e) for e in EVENTS[events_before:]):
-                notes.append("message retour reçu du téléphone (newChatItems, direction Rcv)")
-                results["t12"].ok(" ; ".join(notes))
-                return
+                got_reply = True
+                break
+            remaining = int(deadline - time.monotonic())
+            if remaining <= next_tick:
+                print(f"   ⏳ {remaining} s pour répondre au ping depuis le téléphone…",
+                      flush=True)
+                next_tick -= 10
             await asyncio.sleep(1)
-        notes.append(
-            "aucun message retour capturé pendant la fenêtre — répondez au ping "
-            "depuis le téléphone dès l'affichage « RÉPONDEZ MAINTENANT »"
-        )
-        results["t12"].warn(" ; ".join(notes))
+        if got_reply:
+            notes.append("message retour reçu du téléphone (newChatItems, direction Rcv)")
+            results["t12"].ok(" ; ".join(notes))
+        else:
+            notes.append(
+                "aucun message retour pendant le compte à rebours — répondez au ping "
+                "dès l'affichage « RÉPONDEZ MAINTENANT », vous verrez le décompte"
+            )
+            results["t12"].warn(" ; ".join(notes))
 
 
 async def test_t09_eval_events(results):
@@ -602,7 +611,7 @@ async def test_t09_eval_events(results):
         if t:
             types[t] = types.get(t, 0) + 1
         try:
-            find_keys(json.loads(raw), None, keys_seen)
+            find_keys(json.loads(raw), keys_seen)
         except (ValueError, TypeError):
             pass
     type_summary = ", ".join(f"{k}×{v}" for k, v in sorted(types.items()))
@@ -623,8 +632,8 @@ async def test_t09_eval_events(results):
         results["t09"].warn(
             f"{len(EVENTS)} événements [{type_summary}] — newChatItems et champs "
             f"CLI présents ({', '.join(sorted(item_fields))}) mais aucun message "
-            "entrant (directRcv) : répondez au ping pendant T12 pour valider "
-            "le sens incoming :\n" + sample
+            "entrant (directRcv) : répondez au ping pendant le compte à rebours "
+            "de T12 pour valider le sens incoming :\n" + sample
         )
     elif has_contact_cycle:
         results["t09"].warn(
@@ -721,8 +730,8 @@ async def main():
                              "le bot génère et publie son propre lien pour l'appairage interactif)")
     parser.add_argument("--contact-wait", type=int, default=90,
                         help="secondes max d'attente de l'appairage après publication du lien (défaut 90)")
-    parser.add_argument("--incoming-wait", type=int, default=45,
-                        help="secondes d'attente du message retour après le ping (défaut 45)")
+    parser.add_argument("--incoming-wait", type=int, default=90,
+                        help="secondes d'attente du message retour après le ping (défaut 90)")
     parser.add_argument("--skip", default="", help="tests à ignorer, ex: t08,t12")
     parser.add_argument("--summary", default=None, help="fichier pour le résumé markdown (CI)")
     global ARGS

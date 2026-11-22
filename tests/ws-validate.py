@@ -171,15 +171,28 @@ def find_keys(o, acc=None):
 
 
 # ------------------------------------------------- analyse des événements CLI
-#
-# Structure CLI v7 observée sur la passerelle (d'après les runs réels) :
-#   newChatItems.chatItems[].chatItem = {
-#     "itemId": N,
-#     "meta": {"chatDir": {"type": "directRcv"|"directSnd"|...}, ...},
-#     "content": {"type": "msgContent", "msgContent": {"type": "text"|"image"|
-#                 "video"|"file"|"...", "text": "...", "fileName": "..."}}}
-# Le champ content enveloppe msgContent ; on cherche donc aux deux endroits,
-# avec un balayage récursif en secours pour les variantes de version.
+
+KEY_PATH_RE = re.compile(r"content|msg|text|file|image|video|caption|audio", re.I)
+
+
+def collect_key_paths(o, prefix="$", acc=None):
+    """Cartographie récursive : chemin (breadcrumb) de chaque clé dont le nom
+    ressemble à du contenu de message, avec aperçu de la valeur. Sert à
+    localiser où la version du CLI place réellement le corps du message."""
+    if acc is None:
+        acc = []
+    if isinstance(o, dict):
+        for k, v in o.items():
+            path = f"{prefix}.{k}"
+            if KEY_PATH_RE.search(str(k)) and not isinstance(v, (dict, list)):
+                preview = str(v)[:60]
+                acc.append(f"{path} = {preview!r}")
+            collect_key_paths(v, path, acc)
+    elif isinstance(o, list):
+        for idx, v in enumerate(o[:5]):  # limiter la profondeur des listes
+            collect_key_paths(v, f"{prefix}[{idx}]", acc)
+    return acc
+
 
 def find_first_value(o, key):
     """Première valeur trouvée pour une clé donnée, en profondeur d'abord."""
@@ -199,28 +212,35 @@ def find_first_value(o, key):
 
 
 def extract_msg_content(chat_item):
-    """Retourne le dict msgContent d'un chatItem, quel que soit l'emplacement :
-    chatItem.content.msgContent (forme v7), chatItem.msgContent (forme plate),
-    ou recherche récursive en dernier recours."""
+    """Retourne le dict de contenu d'un chatItem quel que soit l'emplacement.
+    Formes connues : chatItem.content.msgContent (v7 documentée),
+    chatItem.msgContent (plate). Sinon : recherche de toute clé dont le nom
+    contient 'msgContent' ou 'content' (variantes de sérialisation)."""
     content = chat_item.get("content")
     if isinstance(content, dict):
         mc = content.get("msgContent")
         if isinstance(mc, dict):
             return mc
+        # forme abrégée possible : content = {"type": "...", ...} directement
+        if "type" in content:
+            return content
     mc = chat_item.get("msgContent")
     if isinstance(mc, dict):
         return mc
-    mc = find_first_value(chat_item, "msgContent")
-    return mc if isinstance(mc, dict) else {}
+    for key in ("msgContent", "content", "msg"):
+        mc = find_first_value(chat_item, key)
+        if isinstance(mc, dict) and mc.get("type"):
+            return mc
+    return {}
 
 
 def parse_event(raw):
     """Décode une frame d'événement CLI :
-    retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set}
-    ou None si la frame n'est pas un événement exploitable.
-    Chaque résumé contient direction (chatDir.type), kind (msgContent.type),
-    item_id, text_preview — les primitives que HA dérive pour
-    alias/chat_ref/text/direction/item_id."""
+    retourne {"type": ..., "items": [résumés de chatItem], "raw_keys": set,
+    "key_paths": [...]} ou None si la frame n'est pas un événement exploitable.
+    Chaque résumé contient direction (chatDir.type), kind (type de contenu),
+    item_id, contact (alias depuis chatInfo) et text_preview — les primitives
+    que HA dérive pour alias/chat_ref/text/direction/item_id."""
     try:
         obj = json.loads(raw)
     except (ValueError, TypeError):
@@ -228,8 +248,10 @@ def parse_event(raw):
     resp = obj.get("resp") if isinstance(obj, dict) else None
     if not isinstance(resp, dict):
         return None
-    out = {"type": resp.get("type"), "items": [], "raw_keys": set()}
+    out = {"type": resp.get("type"), "items": [], "raw_keys": set(),
+           "key_paths": []}
     find_keys(resp, out["raw_keys"])
+    out["key_paths"] = collect_key_paths(resp)
 
     if out["type"] == "newChatItems":
         items = resp.get("chatItems") or []
@@ -238,6 +260,14 @@ def parse_event(raw):
         for it in items:
             if not isinstance(it, dict):
                 continue
+            # alias du pair : chatInfo.contact.localDisplayName (= "alias" HA)
+            contact = "?"
+            chat_info = it.get("chatInfo")
+            if isinstance(chat_info, dict):
+                c = chat_info.get("contact")
+                if isinstance(c, dict):
+                    contact = str(c.get("localDisplayName") or
+                                  (c.get("profile") or {}).get("displayName") or "?")
             # CLI v7 : chatItems[].chatItem.{meta.chatDir, content.msgContent}
             chat_item = it.get("chatItem") if isinstance(it.get("chatItem"), dict) else it
             meta = chat_item.get("meta") if isinstance(chat_item.get("meta"), dict) else {}
@@ -252,6 +282,7 @@ def parse_event(raw):
                 "direction": str(direction),
                 "kind": str(kind),
                 "item_id": item_id,
+                "contact": contact,
                 "text_preview": str(text)[:80],
             })
     return out
@@ -652,13 +683,13 @@ async def test_t12_pairing_and_send(results):
         while time.monotonic() < deadline:
             for raw in EVENTS:
                 for i in event_incoming_items(raw):
-                    key = (i["item_id"], i["direction"], i["text_preview"])
+                    key = (i["item_id"], i["direction"], i["text_preview"], i["kind"])
                     if key not in seen_keys:
                         seen_keys.add(key)
-                        received_notes.append((i["item_id"], i["kind"], i["text_preview"]))
-                        print(f"   📥 message reçu du téléphone ! direction={i['direction']} "
-                              f"contenu={i['kind']} itemId={i['item_id']} "
-                              f"extrait={i['text_preview']!r}", flush=True)
+                        received_notes.append((i["item_id"], i["contact"], i["kind"], i["text_preview"]))
+                        print(f"   📥 message reçu du téléphone ! de=@{i['contact']} "
+                              f"direction={i['direction']} contenu={i['kind']} "
+                              f"itemId={i['item_id']} extrait={i['text_preview']!r}", flush=True)
                         got_reply = True
             if got_reply:
                 break
@@ -671,7 +702,7 @@ async def test_t12_pairing_and_send(results):
             await asyncio.sleep(1)
         if got_reply:
             notes.append("message(s) retour reçu(s) du téléphone (directRcv) : "
-                         + "; ".join(f"[{k}] {p!r}" for _, k, p in received_notes))
+                         + "; ".join(f"de=@{c} [{k}] {p!r}" for _, c, k, p in received_notes))
             results["t12"].ok(" ; ".join(notes))
         else:
             notes.append(
@@ -683,15 +714,41 @@ async def test_t12_pairing_and_send(results):
             results["t12"].warn(" ; ".join(notes))
 
 
+def dump_event_diagnostics(raw):
+    """Diagnostics complets d'une frame : cartographie des chemins de clés
+    suspectes (contenu du message) + JSON intégral. Sort à la fois dans le
+    log (stdout) et dans le Summary CI, sans troncature de la structure."""
+    ev = parse_event(raw)
+    paths = (ev or {}).get("key_paths") or []
+    lines = ["   🔍 CARTOGRAPHIE DES CLÉS DE CONTENU (chemin = valeur) :"]
+    for p in paths[:40]:
+        lines.append(f"      {p}")
+    if not paths:
+        lines.append("      (aucune clé ressemblant à un contenu de message)")
+    full = raw if len(raw) <= 6000 else raw[:6000] + " …[tronqué]"
+    lines.append("   🔍 JSON INTÉGRAL de la frame :")
+    lines.append(f"      {full}")
+    text = "\n".join(lines)
+    print(text, flush=True)
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write("### 🔍 Diagnostics structure CLI (T09)\n\n```\n"
+                        + text.replace("   ", "") + "\n```\n")
+        except OSError:
+            pass
+
+
 async def test_t09_eval_events(results):
     """T09 — Évaluation du flux entrant capturé par le listener pendant toute
     la suite. Vérifie les primitives CLI que HA consomme :
       - événements de cycle de contact (contactConnecting/contactConnected) ;
-      - newChatItems avec chatItem.meta.itemId, chatDir, content.msgContent ;
+      - newChatItems avec chatItem.meta.itemId, chatDir, contenu du message ;
       - au moins un message REÇU (chatDir directRcv) = event
         simplex_message_received + sensor last_message garantis côté HA.
-    Affiche un résumé lisible de chaque chatItem + le JSON brut du premier
-    newChatItems (pour vérifier la structure exacte de la version du CLI)."""
+    En cas de doute sur l'emplacement du contenu, dump une cartographie
+    complète des clés + le JSON intégral de la frame."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
@@ -703,45 +760,54 @@ async def test_t09_eval_events(results):
     directions_seen = set()
     kinds_seen = set()
     fields_seen = set()
+    contacts_seen = set()
     first_newchatitems_raw = None
+    dumped = False
     for raw in EVENTS:
         ev = parse_event(raw)
         if not ev:
             continue
         fields_seen |= ev["raw_keys"]
-        if ev["type"] == "newChatItems" and first_newchatitems_raw is None:
-            first_newchatitems_raw = raw
-        for i in ev["items"]:
-            directions_seen.add(i["direction"])
-            kinds_seen.add(i["kind"])
-            item_lines.append(
-                f"chatItem: direction={i['direction']} contenu={i['kind']} "
-                f"itemId={i['item_id']} extrait={i['text_preview']!r}"
-            )
+        if ev["type"] == "newChatItems":
+            if first_newchatitems_raw is None:
+                first_newchatitems_raw = raw
+            for i in ev["items"]:
+                directions_seen.add(i["direction"])
+                kinds_seen.add(i["kind"])
+                contacts_seen.add(i["contact"])
+                item_lines.append(
+                    f"chatItem: de=@{i['contact']} direction={i['direction']} "
+                    f"contenu={i['kind']} itemId={i['item_id']} "
+                    f"extrait={i['text_preview']!r}"
+                )
 
     has_chat_items = "newChatItems" in type_summary
     has_incoming = any(d.lower().startswith("directrcv") for d in directions_seen)
     item_fields = {"itemId", "chatDir", "msgContent"} & fields_seen
     sample = "\n".join(item_lines[:10]) or "(aucun chatItem dans les événements capturés)"
-    raw_sample = (first_newchatitems_raw or "")[:1200]
 
     if has_chat_items and has_incoming and len(item_fields) == 3:
         results["t09"].ok(
             f"{len(EVENTS)} événements [{type_summary}] — message(s) ENTRANT validés "
-            f"(directRcv), contenus vus : {', '.join(sorted(kinds_seen))}. Champs CLI "
-            f"itemId/chatDir/msgContent présents (base des alias/chat_ref/text/"
-            f"direction/item_id de HA) :\n{sample}\n"
-            f"JSON brut du 1er newChatItems : {raw_sample}"
+            f"(directRcv), contacts vus : {', '.join('@' + c for c in sorted(contacts_seen))}, "
+            f"contenus vus : {', '.join(sorted(kinds_seen))}. Champs CLI itemId/chatDir/"
+            f"msgContent présents (base des alias/chat_ref/text/direction/item_id de HA) :\n"
+            f"{sample}"
         )
     elif has_chat_items and has_incoming:
-        # directRcv validé mais structure msgContent à confirmer :
-        # afficher le JSON brut pour ajuster l'extracteur si besoin
+        # directRcv validé mais emplacement du contenu inconnu : diagnostics complets
+        if not dumped and first_newchatitems_raw:
+            print("\n>>> T09 : msgContent non localisé — dump diagnostique complet :\n",
+                  flush=True)
+            dump_event_diagnostics(first_newchatitems_raw)
+            dumped = True
         results["t09"].warn(
             f"{len(EVENTS)} événements [{type_summary}] — messages ENTRANTS (directRcv) "
-            f"capturés et itemId/chatDir validés, mais msgContent non localisé dans la "
-            f"structure (champs vus : {', '.join(sorted(item_fields))}) — le JSON brut "
-            f"ci-dessous montre l'emplacement exact à mapper côté HA :\n{sample}\n"
-            f"JSON brut du 1er newChatItems : {raw_sample}"
+            f"capturés, itemId/chatDir/alias(contact) validés, mais l'emplacement du "
+            f"contenu du message n'est pas celui attendu (champs ciblés vus : "
+            f"{', '.join(sorted(item_fields))}). La cartographie des clés + le JSON "
+            f"intégral ci-dessus montrent où il se trouve réellement — à mapper côté HA "
+            f"si nécessaire :\n{sample}"
         )
     elif has_chat_items and len(item_fields) == 3:
         results["t09"].warn(

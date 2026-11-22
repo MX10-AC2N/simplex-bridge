@@ -9,13 +9,12 @@ on:
       duration:
         description: "Durée du test de stabilité (secondes)"
         default: "60"
-      listen_events:
-        description: "Secondes d'écoute des events entrants (0 = ignoré ; envoyer un message au bot pendant le run)"
-        default: "0"
-      invite_link:
-        description: "Lien d'invitation SimpleX réel (depuis un autre appareil) pour tester accept_invite"
-        default: ""
-        required: false
+      contact_wait:
+        description: "Attente max de l'appairage téléphone après publication du lien (secondes)"
+        default: "90"
+      incoming_wait:
+        description: "Fenêtre pour répondre au ping depuis le téléphone (secondes)"
+        default: "45"
 
 jobs:
   ws-validation:
@@ -50,13 +49,14 @@ jobs:
       - name: Run WebSocket validation suite
         env:
           DURATION: ${{ inputs.duration || 60 }}
-          LISTEN_EVENTS: ${{ inputs.listen_events || 0 }}
-          SIMPLEX_INVITE_LINK: ${{ inputs.invite_link || '' }}
+          CONTACT_WAIT: ${{ inputs.contact_wait || 90 }}
+          INCOMING_WAIT: ${{ inputs.incoming_wait || 45 }}
         run: |
           python3 tests/ws-validate.py \
             --url ws://127.0.0.1:5225 \
             --duration "$DURATION" \
-            --listen-events "$LISTEN_EVENTS"
+            --contact-wait "$CONTACT_WAIT" \
+            --incoming-wait "$INCOMING_WAIT"
 
       - name: Export bridge logs
         if: always()

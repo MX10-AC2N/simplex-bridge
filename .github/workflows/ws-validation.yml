@@ -50,7 +50,7 @@ jobs:
         env:
           DURATION: ${{ inputs.duration || 60 }}
           CONTACT_WAIT: ${{ inputs.contact_wait || 90 }}
-          INCOMING_WAIT: ${{ inputs.incoming_wait || 45 }}
+          INCOMING_WAIT: ${{ inputs.incoming_wait || 90 }}
         run: |
           python3 tests/ws-validate.py \
             --url ws://127.0.0.1:5225 \

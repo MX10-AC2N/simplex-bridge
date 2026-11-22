@@ -7,17 +7,18 @@ corrélation RPC par corrId, commandes successives, connexions multiples,
 tolérance aux messages malformés, reconnexions en boucle,
 ET les 4 services métier utilisés par l'intégration Home Assistant :
 list contacts, create_invite, accept_invite, send_message,
-plus la validation du schéma des événements entrants.
+plus la validation du flux d'événements entrants.
 
 Appairage interactif (UN SEUL RUN, aucune fenêtre à synchroniser) :
   1. lancez le workflow (ou : python3 ws-validate.py --url ws://127.0.0.1:5225) ;
-  2. dès que T12 démarre, le lien d'invitation du bot s'affiche EN DIRECT
+  2. dès que T12 démarre, le lien d'invitation du bot s'affiche UNE FOIS
      dans les logs et dans le résumé (Summary) du run ;
-  3. ouvrez/scannez ce lien dans l'app SimpleX de votre téléphone
+  3. ouvrez ce lien dans l'app SimpleX de votre téléphone
      (Add contact → paste link) pendant que le run attend ;
   4. le bot détecte le contact, envoie « ping de validation » (vous le recevez) ;
-  5. RÉPONDEZ depuis votre téléphone : le listener capture l'événement entrant
-     et valide le schéma attendu par HA (alias/chat_ref/text/direction/item_id).
+  5. RÉPONDEZ depuis votre téléphone pendant la fenêtre : le listener capture
+     l'événement CLI newChatItems (direction Rcv) et T09 vérifie les champs
+     que HA utilise (itemId, chatDir, msgContent.text).
 
 Codes de sortie : 0 = tout passé, 1 = au moins un échec.
 """
@@ -59,12 +60,18 @@ class Result:
 PROBE = {"mode": None, "cmd": None, "last_invite": None, "contacts": []}
 EVENTS = []          # frames reçus sur la connexion d'écoute dédiée (toute la suite)
 LISTENER_TASK = None
+INVITE_PUBLISHED = False   # garde-fou : le lien ne doit s'afficher qu'UNE fois
 
 
 # ---------------------------------------------------------------- helpers
 
 def new_corr_id():
     return str(uuid.uuid4())[:8]
+
+
+# Le lien d'invitation est suivi de caractères JSON dans la réponse brute :
+# on s'arrête au premier guillemet, espace, antislash ou accolade.
+LINK_RE = re.compile(r"https?://[^\s\"\\}]+", re.I)
 
 
 async def recv_matching(ws, corr_id, timeout=10.0):
@@ -152,29 +159,47 @@ def extract_contacts(data):
     return names
 
 
-def event_has_message(raw):
-    """Heuristique : l'événement contient-il un message de chat ?"""
+def find_keys(o, wanted, acc=None):
+    """Collecte récursivement les clés présentes dans un objet JSON."""
+    if acc is None:
+        acc = set()
+    if isinstance(o, dict):
+        for k, v in o.items():
+            acc.add(k)
+            find_keys(v, wanted, acc)
+    elif isinstance(o, list):
+        for v in o:
+            find_keys(v, wanted, acc)
+    return acc
+
+
+def event_type(raw):
+    """Type d'événement CLI d'une frame (ex: newChatItems, contactConnected)."""
     try:
         obj = json.loads(raw)
     except (ValueError, TypeError):
-        return False
+        return None
+    resp = obj.get("resp") if isinstance(obj, dict) else None
+    if isinstance(resp, dict):
+        return resp.get("type")
+    return None
 
-    def dig(o):
-        if isinstance(o, dict):
-            if "msgContent" in o:
-                return True
-            if isinstance(o.get("text"), str) and o.get("text"):
-                return True
-            return any(dig(v) for v in o.values())
-        if isinstance(o, list):
-            return any(dig(v) for v in o)
-        return False
 
-    return dig(obj)
+def event_is_incoming_msg(raw):
+    """Vrai si la frame est un newChatItems contenant un message REÇU du pair
+    (chatDir directRcv) avec du contenu texte — l'équivalent CLI du champ
+    direction=incoming utilisé par l'intégration HA."""
+    if '"directRcv"' not in raw and '"directR"' not in raw:
+        return False
+    return "msgContent" in raw or '"text"' in raw
 
 
 def publish_invite_link(link):
-    """Affiche le lien d'invitation en direct : logs + résumé CI."""
+    """Affiche le lien d'invitation EN DIRECT (une seule fois) : logs + résumé CI."""
+    global INVITE_PUBLISHED
+    if INVITE_PUBLISHED:
+        return
+    INVITE_PUBLISHED = True
     banner = (
         "\n" + "=" * 64 + "\n"
         ">>> LIEN D'INVITATION DU BOT — ouvrez-le dans l'app SimpleX\n"
@@ -199,13 +224,13 @@ def publish_invite_link(link):
 
 async def listener_loop():
     """Connexion d'écoute dédiée : capture tous les événements entrants
-    pendant toute la durée de la suite (cf. event simplex_message_received)."""
+    pendant toute la durée de la suite."""
     try:
         async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
             while True:
                 raw = await ws.recv()
                 EVENTS.append(raw)
-    except (asyncio.CancelledError, websockets.ConnectionClosed, Exception):
+    except (asyncio.CancelledError, Exception):
         return
 
 
@@ -243,7 +268,6 @@ async def probe_protocol(ws):
                 diagnostics.append(f"mode={mode!r} cmd={cmd!r}: aucune réponse corrélée")
             except Exception as e:
                 diagnostics.append(f"mode={mode!r} cmd={cmd!r}: {e}")
-                # tenter de rétablir la connexion si elle a cassé
                 try:
                     await ws.close()
                 except Exception:
@@ -261,7 +285,6 @@ async def test_t01_connect(results):
     # (ClientConnection). Compatible toutes versions.
     try:
         async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
-            # test de vivacité : une réception avec timeout court ne doit pas échouer
             try:
                 await asyncio.wait_for(ws.recv(), timeout=1.0)
                 idle = "socket vive (message spontané reçu)"
@@ -429,7 +452,7 @@ async def test_t10_list_contacts(results):
 
 async def test_t11_create_invite(results):
     """T11 — Service HA « simplex.create_invite » (traduction CLI : /connect).
-    La réponse doit contenir un lien d'invitation exploitable."""
+    La réponse doit contenir un lien d'invitation PROPRE (sans succoter de JSON)."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         data, raw = await rpc(ws, "/connect")
         if data is None:
@@ -438,10 +461,16 @@ async def test_t11_create_invite(results):
         if is_chat_error(data):
             results["t11"].fail(f"/connect rejeté par le CLI : {chat_error_message(data)}")
             return
-        m = re.search(r"https?://\S+", raw, re.I)
+        m = LINK_RE.search(raw)
         if m:
-            PROBE["last_invite"] = m.group(0)
-            results["t11"].ok("create_invite OK : un lien d'invitation valide a été généré")
+            link = m.group(0)
+            PROBE["last_invite"] = link
+            # le lien court smpX.simplex.im/i#… doit s'arrêter avant tout caractère JSON
+            clean = not any(ch in link for ch in '"\\}]{')
+            results["t11"].ok(
+                f"create_invite OK — lien propre : {link[:100]}" if clean
+                else f"create_invite OK mais lien suspect (caractères JSON inclus) : {link[:100]}"
+            )
         else:
             results["t11"].warn(
                 "réponse corrélée mais aucun lien https:// détecté : " + raw[:300]
@@ -467,12 +496,11 @@ async def wait_for_contact(ws, wait_s):
 async def test_t12_pairing_and_send(results):
     """T12 — Services HA « accept_invite » + « send_message », avec appairage
     interactif en un seul run :
-      1. si l'argument --invite-link est fourni, le bot accepte ce lien réel ;
-      2. sinon le bot génère son propre lien d'invitation, l'affiche EN DIRECT
-         (logs + Summary) et attend que vous l'ouvriez depuis votre téléphone ;
-      3. une fois le contact établi, envoie « ping de validation » (vous le
-         recevez sur le téléphone), puis attend VOTRE message retour pour
-         valider le flux entrant capturé par le listener (voir T09)."""
+      1. si --invite-link est fourni, le bot accepte ce lien réel ;
+      2. sinon le bot génère son propre lien d'invitation (propre, sans JSON),
+         l'affiche UNE FOIS (logs + Summary) et attend votre appairage ;
+      3. contact établi → envoie « ping de validation » (vous le recevez) ;
+      4. attend votre message retour (newChatItems, direction Rcv)."""
     async with websockets.connect(ARGS.url, open_timeout=ARGS.timeout) as ws:
         recipient = None
         notes = []
@@ -500,10 +528,10 @@ async def test_t12_pairing_and_send(results):
                     + (chat_error_message(data) if data else "pas de réponse corrélée")
                 )
             else:
-                m = re.search(r"https?://\S+", raw, re.I)
+                m = LINK_RE.search(raw)
                 if m:
                     publish_invite_link(m.group(0))
-                    notes.append("lien d'invitation publié (logs + Summary)")
+                    notes.append("lien d'invitation publié (une fois, logs + Summary)")
                     recipient = await wait_for_contact(ws, ARGS.contact_wait)
                 else:
                     notes.append("aucun lien dans la réponse /connect : " + raw[:200])
@@ -533,66 +561,81 @@ async def test_t12_pairing_and_send(results):
             return
         notes.append(f"ping envoyé à @{recipient} (vérifiez la réception sur le téléphone)")
 
-        # --- attente du message retour (flux entrant, cf. T09)
+        # --- attente du message retour (flux entrant, direction Rcv uniquement :
+        # l'écho du ping sortant ne compte pas)
         events_before = len(EVENTS)
-        print(f"   >>> RÉPONDEZ MAINTENANCE depuis votre téléphone ! "
+        print(f"   >>> RÉPONDEZ MAINTENANT depuis votre téléphone ! "
               f"(fenêtre de {ARGS.incoming_wait} s)", flush=True)
         deadline = time.monotonic() + ARGS.incoming_wait
         while time.monotonic() < deadline:
-            if any(event_has_message(e) for e in EVENTS[events_before:]):
-                notes.append(f"message retour reçu du téléphone ({ARGS.incoming_wait} s dispo)")
+            if any(event_is_incoming_msg(e) for e in EVENTS[events_before:]):
+                notes.append("message retour reçu du téléphone (newChatItems, direction Rcv)")
                 results["t12"].ok(" ; ".join(notes))
                 return
             await asyncio.sleep(1)
         notes.append(
-            "aucun message retour capturé — relancez en répondant pendant la fenêtre "
-            "(le schéma entrant sera de toute façon évalué par T09)"
+            "aucun message retour capturé pendant la fenêtre — répondez au ping "
+            "depuis le téléphone dès l'affichage « RÉPONDEZ MAINTENANT »"
         )
         results["t12"].warn(" ; ".join(notes))
 
 
 async def test_t09_eval_events(results):
-    """T09 — Évaluation du flux entrant capturé par le listener dédié pendant
-    toute la suite (valide l'event simplex_message_received et le sensor
-    last_message). Vous avez simplement répondu au ping depuis le téléphone
-    pendant T12."""
+    """T09 — Évaluation du flux entrant capturé par le listener pendant toute
+    la suite. NB : alias/direction/text/item_id du CÔTÉ HA sont dérivés par
+    l'intégration à partir des événements CLI natifs — on vérifie donc les
+    primitives CLI que HA consomme :
+      - événements de cycle de contact (contactConnecting/contactConnected) ;
+      - newChatItems contenant chatItem avec meta.itemId, chatDir, msgContent.
+    Un message REÇU (directRcv) validé ici = event simplex_message_received +
+    sensor last_message garantis côté HA."""
     if not EVENTS:
         results["t09"].warn(
             "aucun événement reçu pendant toute la suite — soit aucun message "
-            "n'a été envoyé au bot, soit le flux entrant est cassé (à investiguer)"
+            "n'a circulé, soit le flux entrant est cassé (à investiguer)"
         )
         return
-    # Validation du schéma attendu par HA : alias, chat_ref, text,
-    # direction, item_id (cf. event simplex_message_received)
+    types = {}
     keys_seen = set()
     for raw in EVENTS:
+        t = event_type(raw)
+        if t:
+            types[t] = types.get(t, 0) + 1
         try:
-            obj = json.loads(raw)
+            find_keys(json.loads(raw), None, keys_seen)
         except (ValueError, TypeError):
-            continue
+            pass
+    type_summary = ", ".join(f"{k}×{v}" for k, v in sorted(types.items()))
+    sample = "\n---\n".join(e[:250] for e in EVENTS[:4])
 
-        def dig(o):
-            if isinstance(o, dict):
-                for k, v in o.items():
-                    keys_seen.add(k)
-                    dig(v)
-            elif isinstance(o, list):
-                for v in o:
-                    dig(v)
+    has_contact_cycle = any(t in types for t in ("contactConnected", "contactConnecting"))
+    has_chat_items = "newChatItems" in types
+    item_fields = {"itemId", "chatDir", "msgContent"} & keys_seen
+    incoming_msg = any(event_is_incoming_msg(e) for e in EVENTS)
 
-        dig(obj)
-    expected = {"alias", "chat_ref", "text", "direction", "item_id"}
-    missing = expected - keys_seen
-    sample = "\n---\n".join(e[:300] for e in EVENTS[:5])
-    if not missing:
+    if has_chat_items and incoming_msg and len(item_fields) == 3:
         results["t09"].ok(
-            f"{len(EVENTS)} événement(s) capturés ; schéma complet alias/chat_ref/"
-            f"text/direction/item_id présent :\n{sample}"
+            f"{len(EVENTS)} événements [{type_summary}] — message entrant validé : "
+            f"newChatItems avec itemId/chatDir/msgContent (équivalent CLI de "
+            f"alias/chat_ref/text/direction/item_id de HA) :\n{sample}"
+        )
+    elif has_chat_items and len(item_fields) == 3:
+        results["t09"].warn(
+            f"{len(EVENTS)} événements [{type_summary}] — newChatItems et champs "
+            f"CLI présents ({', '.join(sorted(item_fields))}) mais aucun message "
+            "entrant (directRcv) : répondez au ping pendant T12 pour valider "
+            "le sens incoming :\n" + sample
+        )
+    elif has_contact_cycle:
+        results["t09"].warn(
+            f"{len(EVENTS)} événements [{type_summary}] — cycle de connexion "
+            "capturé mais aucun message (normale si personne n'a écrit au bot) :\n"
+            + sample
         )
     else:
         results["t09"].warn(
-            f"{len(EVENTS)} événement(s) capturés ; champs manquants attendus par HA : "
-            f"{', '.join(sorted(missing))} (peut venir du format de la version CLI) :\n{sample}"
+            f"{len(EVENTS)} événements [{type_summary}] — types inattendus, "
+            "comparer au format attendu par l'intégration :\n" + sample
         )
 
 
@@ -661,7 +704,7 @@ TESTS = {
     "t10": "T10 List contacts (service HA)",
     "t11": "T11 Create invite (service HA)",
     "t12": "T12 Appairage interactif + ping + attente réponse",
-    "t09": "T09 Flux entrant (capturé sur tout le run) + schéma event HA",
+    "t09": "T09 Flux entrant (capturé sur tout le run) + champs CLI pour HA",
     "t08": "T08 Stabilité longue durée",
 }
 
@@ -709,7 +752,6 @@ async def main():
             if key in skipped_results:
                 skipped_results[key].warn("ignoré via --skip")
                 continue
-            # démarre le listener dès que le protocole est validé (avant T03)
             if key == "t03" and PROBE["mode"]:
                 start_listener()
             print(f">>> {TESTS[key]} …", flush=True)

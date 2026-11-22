@@ -14,7 +14,7 @@ on:
         default: "90"
       incoming_wait:
         description: "Fenêtre pour répondre au ping depuis le téléphone (secondes)"
-        default: "45"
+        default: "99"
 
 jobs:
   ws-validation:

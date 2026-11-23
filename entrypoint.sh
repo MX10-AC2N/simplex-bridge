@@ -231,6 +231,13 @@ if [ "$SIMPLEX_FILES_DIR" = "/" ]; then
     exit 1
 fi
 mkdir -p "$SIMPLEX_FILES_DIR"
+
+# Couvre le cas override hors de $DATA_DIR : le chown -R $DATA_DIR plus bas
+# ne le toucherait pas, et le démon ne pourrait pas y écrire.
+if [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
+    chown -R "$PUID:$PGID" "$SIMPLEX_FILES_DIR"
+fi
+
 # FIX — Lisibilité des fichiers reçus par Home Assistant ─────────────
 # HA monte ce volume dans un conteneur séparé qui ne partage ni UID ni GID
 # avec le pont : chaque fichier créé par le démon PENDANT l'exécution doit

@@ -1017,7 +1017,7 @@ def _mock_ha_mapping(item):
     }
 
 
-def test_t13_replay(results):
+async def test_t13_replay(results):
     """T13 — Replay local des frames CLI v7 réelles à travers la réplique du
     mapping HA. Garde-fou contre une évolution de sérialisation du CLI :
     si un champ change d'emplacement (cf. itemId), ce test échoue AVANT la

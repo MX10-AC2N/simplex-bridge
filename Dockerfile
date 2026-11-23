@@ -11,13 +11,13 @@ LABEL org.opencontainers.image.vendor="MX10-AC2N"
 LABEL org.opencontainers.image.licenses="AGPL-3.0"
 LABEL org.opencontainers.image.url="https://github.com/MX10-AC2N/simplex-bridge"
 LABEL org.opencontainers.image.source="https://github.com/MX10-AC2N/simplex-bridge"
-LABEL org.opencontainers.image.documentation="https://github.com/MX10-AC2N/simplex-bridge"
+LABEL org.opencontainers.image.documentation="https://github.com/MX10-AC2N/simplex-bridge#readme"
 
 # SimpleX Chat uses the SMP protocol — no persistent user IDs, fully private
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl iproute2 python3 python3-pip socat tzdata && \
-    pip3 install --no-cache-dir --break-system-packages websockets==17.4 && \
+    pip3 install --no-cache-dir --break-system-packages websockets==17.0.1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install gosu — Ubuntu equivalent of Alpine's su-exec (static Go binary)
@@ -55,10 +55,6 @@ RUN set -eux; \
     sha256sum -c /tmp/gosu-checksum.txt; \
     rm -f /tmp/gosu.SHA256SUMS /tmp/gosu-checksum.txt /tmp/gosu.line; \
     chmod +x /usr/local/bin/gosu
-
-# Fix permission /data/received_files
-RUN mkdir -p /data/received_files \
- && chown -R 99:100 /data
 
 # Create generic user — UID/GID are overridden at runtime via PUID/PGID
 # Use GID 911 as the build-time default (GID 1000 is taken on Ubuntu 24.04)

@@ -213,10 +213,20 @@ if [ -n "${TZ:-}" ] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
     echo "$TZ" > /etc/timezone
 fi
 
+# ── Fix data directory ownership ───────────────────────────────────
+# Avoid a recursive walk when the top directory already has the
+# requested owner.
+
+if [ "$(stat -c '%u:%g' "$DATA_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
+    echo "[entrypoint] Fixing ownership of $DATA_DIR..."
+    chown -R "$PUID:$PGID" "$DATA_DIR"
+else
+    echo "[entrypoint] $DATA_DIR already owned by $PUID:$PGID — skipping chown"
+fi
+
 # ── Incoming files directory ───────────────────────────────────────
-# Create this BEFORE the chown below: cap_drop:ALL removes
-# CAP_DAC_OVERRIDE, so once /data is chowned to PUID:PGID, root
-# can no longer mkdir inside it.
+# Keep received attachments in a dedicated volume so Home Assistant can
+# mount that volume read-only without gaining access to the SimpleX DB/keys.
 SIMPLEX_FILES_DIR="${SIMPLEX_FILES_DIR:-$DATA_DIR/received_files}"
 case "$SIMPLEX_FILES_DIR" in
     /*) ;;
@@ -227,14 +237,8 @@ if [ "$SIMPLEX_FILES_DIR" = "/" ]; then
     exit 1
 fi
 mkdir -p "$SIMPLEX_FILES_DIR"
-
-# ── Fix data directory ownership ───────────────────────────────────
-if [ "$(stat -c '%u:%g' "$DATA_DIR" 2>/dev/null)" != "$PUID:$PGID" ] \
-   || [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
-    echo "[entrypoint] Fixing ownership of $DATA_DIR..."
-    chown -R "$PUID:$PGID" "$DATA_DIR"
-else
-    echo "[entrypoint] $DATA_DIR already owned by $PUID:$PGID — skipping chown"
+if [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
+    chown -R "$PUID:$PGID" "$SIMPLEX_FILES_DIR"
 fi
 
 # ── Build extra flags ──────────────────────────────────────────────

@@ -4,7 +4,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/mx10-ac2n/simplex-bridge:latest
+    # Pinned to the v1.4.0 release tag, not :latest, which moves with main
+    # and could silently serve a different build on `docker compose pull`.
+    # This is a tag pin, not yet a @sha256: digest pin: the digest can only
+    # be read back once CI has built and published this tag (see
+    # CHANGELOG.md "Changed" for the exact follow-up command).
+    image: ghcr.io/mx10-ac2n/simplex-bridge:v1.4.0
     container_name: simplex-bridge
     # Home Assistant must also use network_mode: host on this same Linux host.
     # Both containers then reach the CLI via ws://127.0.0.1:5225.

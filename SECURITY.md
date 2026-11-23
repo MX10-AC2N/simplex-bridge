@@ -14,7 +14,7 @@ Please include:
 - What the issue is, and which component it affects (image, entrypoint,
   `healthcheck.py`, `install-websockets.sh`, or CI)
 - The image tag or commit you tested (`docker buildx imagetools inspect
-  ghcr.io/mx10-ac2n/simplex-bridge:<tag>`)
+  ghcr.io/libre-7/simplex-bridge:<tag>`)
 - Steps to reproduce, and the impact you believe it has
 - Any proof-of-concept output you are willing to share
 

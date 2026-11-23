@@ -1,10 +1,12 @@
-
 # SimpleX Bridge — MX10-AC2N
+
+**English** | [Français](README.fr.md)
 
 A Dockerized SimpleX Chat bot daemon exposing the SimpleX CLI WebSocket API.
 
 This repository is a maintained fork of
-[libre-7/simplex-bridge](https://github.com/libre-7/simplex-bridge).
+[libre-7/simplex-bridge](https://github.com/libre-7/simplex-bridge), extended with
+a Home Assistant-oriented validation suite and hardened startup.
 
 Docker images are published to GitHub Container Registry:
 
@@ -15,13 +17,16 @@ Docker images are published to GitHub Container Registry:
 ## Features
 
 - SimpleX Chat daemon running in WebSocket mode.
-- Automatic bot profile and contact address creation.
+- Automatic bot profile and contact address creation (idempotent — safe across restarts).
 - Persistent database and bot identity.
 - Unprivileged daemon execution using configurable PUID and PGID.
-- Docker DNS permission correction at startup.
-- DNS preflight executed using the actual daemon UID/GID.
-- Docker security hardening.
+- Docker DNS permission correction at startup, verified under the daemon identity.
+- Received attachments stored in a dedicated volume, made world-readable so Home
+  Assistant can mount it read-only.
+- Docker security hardening (dropped capabilities, no-new-privileges).
 - Multi-architecture images (AMD64 and ARM64).
+- Automated WebSocket validation suite (T01–T13) certifying everything the
+  Home Assistant integration relies on.
 
 ## Quick Start
 
@@ -50,9 +55,9 @@ Retrieve the bot contact address:
 docker compose exec simplex-bridge cat /data/bot_address.txt
 ```
 
-The named Docker volume `simplex-data` stores the SimpleX database and bot identity.
-Incoming attachments are stored separately in `simplex-inbox`; the optional shared
-outbox is `simplex-outbox`. Back up `simplex-data` regularly.
+The named Docker volume `simplex-data` stores the SimpleX database and bot
+identity. Incoming attachments are stored separately in `simplex-inbox`; the
+optional shared outbox is `simplex-outbox`. Back up `simplex-data` regularly.
 
 ## Using the Published Image
 
@@ -69,8 +74,37 @@ Image:
 ghcr.io/mx10-ac2n/simplex-bridge:latest
 ```
 
-For production deployments, prefer a specific commit or version tag
-instead of `latest`.
+For production deployments, prefer a specific commit or version tag instead
+of `latest`.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIMPLEX_DISPLAY_NAME` | SimpleX Bridge | Bot display name |
+| `SIMPLEX_AUTO_ACCEPT` | true | Automatic contact acceptance |
+| `SIMPLEX_FILES_ENABLED` | true | Enable file transfers |
+| `SIMPLEX_MARK_READ` | true | Automatically mark messages as read |
+| `SIMPLEX_TOR` | false | Enable the SimpleX Tor option |
+| `SIMPLEX_STARTUP_TIMEOUT` | 15 | WebSocket startup timeout (seconds) |
+| `SIMPLEX_FILES_DIR` | `/data/received_files` | Directory used by the CLI for received attachments (`--files-folder`) |
+| `SIMPLEX_DNS_CHECK_HOST` | smp5.simplex.im | DNS preflight hostname |
+| `SIMPLEX_SOCAT_PORT` | unset | Optional socat listener port |
+| `SIMPLEX_BOT_COMMANDS` | unset | Bot command menu in SimpleX syntax |
+| `PUID` | 99 | Daemon user ID |
+| `PGID` | 100 | Daemon group ID |
+| `TZ` | UTC | Container timezone |
+
+PUID must be non-zero. The daemon is intentionally not run as root.
+
+### Shared attachment volumes with Home Assistant
+
+The Compose file gives the attachment volumes stable Docker names:
+`simplex-inbox` and `simplex-outbox`. A separate Home Assistant Compose project
+can mount those exact volumes as `external: true`. Files landing in the inbox
+are created group/world-readable by design (`umask 0022`), so the integration
+can serve them without permission issues. Keep `simplex-data` private to this
+bridge container; it contains the SimpleX database and identity keys.
 
 ## DNS Permission Fix
 
@@ -87,8 +121,8 @@ On some systems, these files can have restrictive permissions such as:
 
 The SimpleX daemon runs as an unprivileged user.
 
-If this user cannot read these files, DNS resolution fails even when
-the Docker host itself can resolve the same domains.
+If this user cannot read these files, DNS resolution fails even when the
+Docker host itself can resolve the same domains.
 
 ### Solution
 
@@ -157,33 +191,6 @@ docker compose exec simplex-bridge \
 If this fails, inspect Docker networking, DNS forwarding and host firewall
 rules.
 
-## Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `SIMPLEX_DISPLAY_NAME` | SimpleX Bridge | Bot display name |
-| `SIMPLEX_AUTO_ACCEPT` | true | Automatic contact acceptance |
-| `SIMPLEX_FILES_ENABLED` | true | Enable file transfers |
-| `SIMPLEX_MARK_READ` | true | Automatically mark messages as read |
-| `SIMPLEX_TOR` | false | Enable the SimpleX Tor option |
-| `SIMPLEX_STARTUP_TIMEOUT` | 15 | WebSocket startup timeout |
-| `SIMPLEX_FILES_DIR` | `/data/received_files` | Directory used by the CLI for received attachments (`--files-folder`) |
-| `SIMPLEX_DNS_CHECK_HOST` | smp5.simplex.im | DNS preflight hostname |
-| `SIMPLEX_SOCAT_PORT` | unset | Optional socat listener port |
-| `SIMPLEX_BOT_COMMAND` | unset | Commandes bot au format SimpleX |
-| `PUID` | 99 | Daemon user ID |
-| `PGID` | 100 | Daemon group ID |
-| `TZ` | UTC | Container timezone |
-
-PUID must be non-zero. The daemon is intentionally not run as root.
-
-### Shared attachment volumes with Home Assistant
-
-The Compose file gives the attachment volumes stable Docker names:
-`simplex-inbox` and `simplex-outbox`. A separate Home Assistant Compose project
-can mount those exact volumes as `external: true`. Keep `simplex-data` private to
-this bridge container; it contains the SimpleX database and identity keys.
-
 ## Network and Security
 
 The WebSocket API listens on:
@@ -194,15 +201,17 @@ The WebSocket API listens on:
 
 The API does not provide authentication by default.
 
-Host networking is recommended when Hermes Agent runs on the same machine.
+Host networking is recommended when clients (Home Assistant, Hermes Agent)
+run on the same machine.
 
-For the MX10-AC2N Home Assistant integration on the same Linux host, configure
-**both** `homeassistant` and `simplex-bridge` with `network_mode: host`. In the
-integration, use `ws://127.0.0.1:5225` (this is also its default URL). No Docker
-port mapping and no SOCAT proxy are needed for this topology.
+For the [MX10-AC2N Home Assistant integration](https://github.com/MX10-AC2N/SimpleX-Chat_HA)
+on the same Linux host, configure **both** `homeassistant` and
+`simplex-bridge` with `network_mode: host`. In the integration, use
+`ws://127.0.0.1:5225` (this is also its default URL). No Docker port mapping
+and no SOCAT proxy are needed for this topology.
 
 The host's TCP port 5225 must be free before the bridge starts. The entrypoint
-now fails closed if another process already listens on that port, instead of
+fails closed if another process already listens on that port, instead of
 mistaking an unrelated listener for the SimpleX daemon.
 
 The container drops all Linux capabilities except:
@@ -211,8 +220,8 @@ The container drops all Linux capabilities except:
 - SETUID
 - SETGID
 
-These are required by the root entrypoint to prepare data ownership
-and drop privileges.
+These are required by the root entrypoint to prepare data ownership and drop
+privileges.
 
 The following protection remains enabled:
 
@@ -232,36 +241,84 @@ Do not expose the WebSocket API directly to the Internet.
 
 ### Bot Commands
 
-Tu peux exposer un menu de commandes aux utilisateurs avec :
+You can expose a command menu to users:
 
 ```yaml
 SIMPLEX_BOT_COMMANDS: "'Help':/help,'Status':/status,'Info':/info"
 ```
-Syntaxe complète (menus imbriqués possibles) :
+
+Full syntax (nested menus supported):
+
+```text
 'Label':/keyword,'Menu':{'Sub':/sub <param>}
-Voir la doc officielle.
-https://github.com/simplex-chat/simplex-chat/blob/stable/bots%2FREADME.md
-
-### Hermes Agent Integration
-
-Configure Hermes Agent to connect to:
-
-```bash
-SIMPLEX_WS_URL=ws://127.0.0.1:5225
-SIMPLEX_ALLOW_ALL_USERS=true
-SIMPLEX_HOME_CHANNEL=1
 ```
 
-Both containers must share the host network namespace.
+See the official documentation:
+https://github.com/simplex-chat/simplex-chat/blob/stable/bots/README.md
 
-The repository also provides:
+## WebSocket Validation Suite
+
+`tests/ws-validate.py` (run by
+[`.github/workflows/ws-validation.yml`](.github/workflows/ws-validation.yml))
+validates the complete gateway contract for the Home Assistant integration:
+
+| Interaction HA | Test(s) |
+|---|---|
+| `binary_sensor.simplex_chat_connection` + reconnect backoff | T01, T07 |
+| RPC protocol `{"corrId","cmd"}` (string mode), correlation | T02, T03, T04 |
+| Resilience to malformed frames, concurrent connections | T05, T06 |
+| `list_contacts` / `create_invite` / `accept_invite` / `send_message` | T10, T11, T12 |
+| Long-run stability under real traffic | T08 |
+| Incoming event flux: alias, direction, item_id, text (incl. image/video/file) | T09 |
+| HA chat-item mapping replay (regression guard on CLI serialization) | T13 |
+
+Run locally:
+
+```bash
+python3 tests/ws-validate.py --url ws://127.0.0.1:5225
+```
+
+### Interactive pairing (single run)
+
+The workflow is a `workflow_dispatch` with adjustable parameters (contact wait,
+reply window). During the run:
+
+1. T12 publishes a fresh invitation link in the logs and in the run Summary
+   (line `INVITE LINK: …`);
+2. open that link in the SimpleX app on your phone while the run waits;
+3. the bot sends a validation ping to the new contact;
+4. reply from your phone within the reply window (default 90 s, countdown
+   displayed). Detection keeps running during T08, and T09 evaluates the
+   whole run — a slightly late reply is still counted.
+
+Each CI run creates a brand-new bot identity (the volume is destroyed by
+`down -v`), so always reply in the thread that just received the ping — not
+in an older "SimpleX Bridge" thread from a previous run.
+
+### Certified baseline
+
+**Baseline: [12 PASS / 1 WARN / 0 FAIL](docs/validation-baseline.md)** — run
+dated 2026-11-23, SimpleX CLI 7.1.4.0 / simplexmq 7.1.0.18, `websockets` 17.4.
+
+Immutable reference run:
+https://github.com/MX10-AC2N/simplex-bridge/actions/runs/45246557568
+
+The badge reflects the **latest** run (it turns red if a future change breaks
+the contract); the frozen baseline lives in
+[`docs/validation-baseline.md`](docs/validation-baseline.md).
+
+## Other Integrations (fork heritage)
+
+The upstream fork ships a Hermes Agent integration helper:
 
 ```bash
 bash install-websockets.sh
 ```
 
-This helper installs the WebSocket dependency and checks the Hermes
-integration environment.
+This helper installs the WebSocket dependency and checks the Hermes Agent
+environment (`SIMPLEX_WS_URL`, `SIMPLEX_ALLOW_ALL_USERS`,
+`SIMPLEX_HOME_CHANNEL`). Both containers must share the host network
+namespace.
 
 ## Local Build
 
@@ -297,25 +354,8 @@ The test suite checks:
 - First-run setup.
 - Documentation consistency.
 
-## Validation de référence
-
-Le contrat passerelle ↔ intégration Home Assistant est certifié par la suite
-automatisée [`tests/ws-validate.py`](.github/workflows/ws-validation.yml)
-(T01–T13 : connexion, corrId, résilience, reconnexion, concurrence, services HA,
-flux entrant, replay du mapping).
-
-**Baseline certifiée : [12 PASS / 1 WARN / 0 FAIL](docs/validation-baseline.md)**
-— run du 2026-11-23, CLI 7.1.4.0 / simplexmq 7.1.0.18.
-[Run immuable de référence ici](## Validation de référence
-
-Le contrat passerelle ↔ intégration Home Assistant est certifié par la suite
-automatisée [`tests/ws-validate.py`](.github/workflows/ws-validation.yml)
-(T01–T13 : connexion, corrId, résilience, reconnexion, concurrence, services HA,
-flux entrant, replay du mapping).
-
-**Baseline certifiée : [12 PASS / 1 WARN / 0 FAIL](docs/validation-baseline.md)**
-— run du 2026-11-23, CLI 7.1.4.0 / simplexmq 7.1.0.18.
-[Run immuable de référence ici](https://github.com/MX10-AC2N/simplex-bridge/actions/runs/45246557568/job/137944719536).).
+The WebSocket contract itself is validated by the dedicated suite — see
+[WebSocket Validation Suite](#websocket-validation-suite).
 
 ## Image Publishing
 

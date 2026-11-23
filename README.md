@@ -10,6 +10,8 @@ Docker images are published to GitHub Container Registry:
 
 `ghcr.io/mx10-ac2n/simplex-bridge`
 
+[![WebSocket Validation](https://github.com/MX10-AC2N/simplex-bridge/actions/workflows/ws-validation.yml/badge.svg)](https://github.com/MX10-AC2N/simplex-bridge/actions/workflows/ws-validation.yml)
+
 ## Features
 
 - SimpleX Chat daemon running in WebSocket mode.

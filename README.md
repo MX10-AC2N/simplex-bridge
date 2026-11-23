@@ -297,6 +297,26 @@ The test suite checks:
 - First-run setup.
 - Documentation consistency.
 
+## Validation de référence
+
+Le contrat passerelle ↔ intégration Home Assistant est certifié par la suite
+automatisée [`tests/ws-validate.py`](.github/workflows/ws-validation.yml)
+(T01–T13 : connexion, corrId, résilience, reconnexion, concurrence, services HA,
+flux entrant, replay du mapping).
+
+**Baseline certifiée : [12 PASS / 1 WARN / 0 FAIL](docs/validation-baseline.md)**
+— run du 2026-11-23, CLI 7.1.4.0 / simplexmq 7.1.0.18.
+[Run immuable de référence ici](## Validation de référence
+
+Le contrat passerelle ↔ intégration Home Assistant est certifié par la suite
+automatisée [`tests/ws-validate.py`](.github/workflows/ws-validation.yml)
+(T01–T13 : connexion, corrId, résilience, reconnexion, concurrence, services HA,
+flux entrant, replay du mapping).
+
+**Baseline certifiée : [12 PASS / 1 WARN / 0 FAIL](docs/validation-baseline.md)**
+— run du 2026-11-23, CLI 7.1.4.0 / simplexmq 7.1.0.18.
+[Run immuable de référence ici](https://github.com/MX10-AC2N/simplex-bridge/actions/runs/45246557568/job/137944719536).).
+
 ## Image Publishing
 
 Images are published automatically to:

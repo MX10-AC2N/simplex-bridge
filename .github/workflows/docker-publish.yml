@@ -100,14 +100,16 @@ jobs:
       - name: Run container with compose security options
         run: |
           docker volume create simplex-smoke-data
-          docker volume create simplex-smoke-inbox
-          docker volume create simplex-smoke-outbox
+          # Mirror docker-compose.yml exactly: cap_drop ALL + the three caps
+          # the entrypoint legitimately needs, plus no-new-privileges. Bridge
+          # networking keeps the daemon's 127.0.0.1:5225 bind inside the
+          # container's own netns (the in-container healthcheck still probes
+          # it over loopback) and avoids binding a port on the shared runner
+          # host.
           docker run -d --name simplex-smoke \
             --platform ${{ matrix.platform }} \
             --network bridge \
             -v simplex-smoke-data:/data \
-            -v simplex-smoke-inbox:/data/received_files \
-            -v simplex-smoke-outbox:/config/simplex_outbox \
             --cap-drop ALL \
             --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
             --security-opt no-new-privileges:true \
@@ -171,8 +173,8 @@ jobs:
         if: always()
         run: |
           docker rm -f simplex-smoke 2>/dev/null || true
-          docker volume rm simplex-smoke-data simplex-smoke-inbox simplex-smoke-outbox 2>/dev/null || true
-        
+          docker volume rm simplex-smoke-data 2>/dev/null || true
+
   build:
     name: Build and publish
     runs-on: ubuntu-latest

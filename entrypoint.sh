@@ -231,7 +231,7 @@ if [ "$SIMPLEX_FILES_DIR" = "/" ]; then
     exit 1
 fi
 mkdir -p "$SIMPLEX_FILES_DIR"
-
+chmod 0755 "$SIMPLEX_FILES_DIR" 2>/dev/null || true
 # Couvre le cas override hors de $DATA_DIR : le chown -R $DATA_DIR plus bas
 # ne le toucherait pas, et le démon ne pourrait pas y écrire.
 if [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
@@ -255,8 +255,6 @@ fi
 #      l'umask de l'image de base.
 # Limite connue : si le volume est bind-mounté depuis l'hôte avec des
 # permissions hôte restrictives, rien ne peut passer outre côté conteneur.
-chmod 0755 "$SIMPLEX_FILES_DIR" 2>/dev/null || true
-
 # ── Fix data directory ownership ───────────────────────────────────
 if [ "$(stat -c '%u:%g' "$DATA_DIR" 2>/dev/null)" != "$PUID:$PGID" ] \
    || [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then

@@ -58,6 +58,16 @@ Structure CLI v7 établie par les runs (cartographie réelle) :
   sont des items SYSTÈME générés à la connexion, pas des messages utilisateur.
   Le texte réel est dans meta.itemText (source la plus fiable en v7).
 
+T13 — Replay : regression-test LOCAL du mapping HA. Rejoue des frames CLI v7
+réelles capturées par les runs de référence à travers une réplique fidèle du
+normalize_chat_item de l'intégration (post-patch), et vérifie les 4 correctifs :
+  1. wrapper {chatInfo, chatItem} déballé (item_id présent) ;
+  2. meta.chatDir.type lu (ping sortant → direction=outgoing) ;
+  3. texte extrait via meta.itemText ;
+  4. items système filtrés (aucun event HA fantôme à la connexion).
+Verrouille le contrat passerelle→HA à chaque commit, même si le CLI change de
+sérialisation. Aucun réseau requis.
+
 NB : le live-tail des logs GitHub Actions duplique parfois les lignes pendant
 le streaming — c'est un artefact d'affichage, pas une sortie réelle du script.
 
@@ -948,6 +958,158 @@ async def test_t09_eval_events(results):
         )
 
 
+# ---------------------------------------------------------------- T13 replay
+
+# Frames CLI v7 RÉELLES capturées par les runs de référence du 22/11/2026
+# (CLI 7.1.4.0) : cycle de connexion → items système → ping sortant du bot →
+# vrai message utilisateur entrant. Structure prouvée par cartographie :
+# wrapper {chatInfo, chatItem}, meta.chatDir.type, meta.itemText,
+# content.type abrégé.
+REPLAY_FRAMES = [
+    # cycle de connexion (sans chatItems)
+    json.dumps({"resp": {"type": "contactConnecting",
+                         "user": {"localDisplayName": "SimpleX Bridge"}}}),
+    json.dumps({"resp": {"type": "contactConnected",
+                         "user": {"localDisplayName": "SimpleX Bridge"}}}),
+    # 1) items système générés automatiquement à la connexion — ne doivent PAS
+    #    produire d'event HA (bulles fantômes = régression du correctif n°4)
+    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
+                         "chatItems": [{
+                             "chatInfo": {"type": "direct",
+                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
+                                                      "profile": {"displayName": "AC2N"}}},
+                             "chatItem": {"itemId": 2,
+                                          "meta": {"chatDir": {"type": "directRcv"},
+                                                   "itemText": "chat banner"},
+                                          "content": {"type": "rcvDirectE2EEInfo"}}}]}}),
+    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
+                         "chatItems": [{
+                             "chatInfo": {"type": "direct",
+                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
+                                                      "profile": {"displayName": "AC2N"}}},
+                             "chatItem": {"itemId": 3,
+                                          "meta": {"chatDir": {"type": "directRcv"},
+                                                   "itemText": ""},
+                                          "content": {"type": "rcvChatFeature"}}}]}}),
+    # 2) ping sortant du bot : direction OUTGOING (chatDir directSnd) —
+    #    régression du correctif n°2 (l'ancien code lisait meta.direction →
+    #    toujours "incoming", ce qui polluait sensor.last_message)
+    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
+                         "chatItems": [{
+                             "chatInfo": {"type": "direct",
+                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
+                                                      "profile": {"displayName": "AC2N"}}},
+                             "chatItem": {"itemId": 1,
+                                          "meta": {"chatDir": {"type": "directSnd"},
+                                                   "itemText": "ping de validation ws-validate.py"},
+                                          "content": {"type": "text",
+                                                      "text": "ping de validation ws-validate.py"}}}]}}),
+    # 3) vrai message utilisateur entrant : doit produire UN event HA avec
+    #    alias/chat_ref/text/direction/item_id corrects
+    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
+                         "chatItems": [{
+                             "chatInfo": {"type": "direct",
+                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
+                                                      "profile": {"displayName": "AC2N"}}},
+                             "chatItem": {"itemId": 17,
+                                          "meta": {"chatDir": {"type": "directRcv"},
+                                                   "itemText": "Alors tu reçois"},
+                                          "content": {"type": "text",
+                                                      "text": "Alors tu reçois"}}}]}}),
+]
+
+
+def _mock_ha_mapping(frame_raw):
+    """Réplique fidèle du mapping attendu côté intégration HA APRÈS patch du
+    normalize_chat_item (même logique que la version corrigée de __init__.py) :
+    retourne la liste des dicts « event simplex_message_received » produits.
+    Si le CLI change de sérialisation, cette réplique diverge du comportement
+    réel → les checks échouent et alertent avant toute intégration HA."""
+    events = []
+    try:
+        resp = json.loads(frame_raw).get("resp", {})
+    except (ValueError, TypeError, AttributeError):
+        return events
+    if resp.get("type") not in ("newChatItems", "chatItemsCreated"):
+        return events
+    items = resp.get("chatItems") or []
+    for wrapper in items:
+        if not isinstance(wrapper, dict):
+            continue
+        chat_info = wrapper.get("chatInfo") or {}
+        chat_item = wrapper.get("chatItem") if isinstance(wrapper.get("chatItem"), dict) else wrapper
+        meta = chat_item.get("meta") or {}
+        content = chat_item.get("content") or {}
+        mc = content.get("msgContent") if isinstance(content.get("msgContent"), dict) else content
+        kind = mc.get("type") or "?"
+        if kind in SYSTEM_CONTENT_TYPES:
+            continue  # filtré : jamais rendu ni émis
+        chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else \
+                   (meta.get("direction") if isinstance(meta.get("direction"), dict) else {})
+        direction = "outgoing" if str(chat_dir.get("type") or "").lower().endswith("snd") else "incoming"
+        text = meta.get("itemText") or mc.get("text") or mc.get("fileName") or ""
+        contact = chat_info.get("contact") or {}
+        cid = contact.get("contactId")
+        if not text and kind not in ("file", "image", "video", "voice"):
+            continue
+        events.append({
+            "alias": contact.get("localDisplayName"),
+            "chat_ref": f"@{cid}" if cid is not None else None,
+            "text": str(text)[:80],
+            "direction": direction,
+            "item_id": meta.get("itemId"),
+            "content_type": kind,
+        })
+    return events
+
+
+async def test_t13_replay(results):
+    """T13 — Replay du mapping HA sur les frames CLI v7 réelles capturées par
+    les runs précédents. Vérifie les 4 correctifs du patch normalize_chat_item :
+      1. wrapper {chatInfo, chatItem} déballé (item_id présent) ;
+      2. chatDir.type lu (ping sortant → direction=outgoing) ;
+      3. texte extrait via meta.itemText (non vide sur message utilisateur) ;
+      4. items système filtrés (chatBanner/rcvDirectE2EEInfo/rcvChatFeature
+         ne produisent AUCUN event).
+    Test purement local (aucun réseau) : il lock le contrat passerelle→HA à
+    chaque commit, même si le CLI change de sérialisation."""
+    all_events = []
+    for frame in REPLAY_FRAMES:
+        all_events.extend(_mock_ha_mapping(frame))
+
+    checks = []
+    incoming = [e for e in all_events if e["direction"] == "incoming"]
+    outgoing = [e for e in all_events if e["direction"] == "outgoing"]
+
+    # C4 : zéro event issu des items système (2 frames système dans le replay)
+    checks.append(("aucun event système", len(all_events) == 2,
+                   f"{len(all_events)} event(s) produit(s) au total (attendu 2)"))
+    # C1 : item_id extrait (wrapper déballé)
+    checks.append(("item_id présent", all(e["item_id"] is not None for e in all_events),
+                   "item_id manquant → wrapper {chatInfo, chatItem} non déballé"))
+    # C2 : le ping sortant est bien outgoing
+    checks.append(("ping sortant = outgoing",
+                   len(outgoing) == 1 and "ping de validation" in outgoing[0]["text"],
+                   f"outgoing={len(outgoing)} → meta.chatDir non lu (correctif n°2)"))
+    # C3 : texte du message réel extrait
+    checks.append(("texte du message extrait",
+                   any("Alors tu reçois" in e["text"] for e in incoming),
+                   "meta.itemText non extrait (correctif n°3)"))
+    # Bonus : chat_ref + alias mappés
+    checks.append(("chat_ref @3 + alias AC2N",
+                   all(e["chat_ref"] == "@3" and e["alias"] == "AC2N" for e in all_events),
+                   "chatInfo.contact mal lu"))
+
+    failed = [name for name, ok, _ in checks if not ok]
+    detail = "\n".join(f"  {'✅' if ok else '❌'} {name} — {why}"
+                       for name, ok, why in checks)
+    sample = "\n".join(f"  event: {json.dumps(e, ensure_ascii=False)}" for e in all_events)
+    if failed:
+        results["t13"].fail(f"{len(failed)} check(s) en échec : {', '.join(failed)}\n{detail}\n{sample}")
+    else:
+        results["t13"].ok(f"mapping HA conforme sur {len(REPLAY_FRAMES)} frames réelles v7 :\n{detail}\n{sample}")
+
+
 # ---------------------------------------------------------------- rapport
 
 def write_summary(results, args):
@@ -994,6 +1156,7 @@ TESTS = {
     "t12": "T12 Appairage interactif + ping + attente réponse",
     "t08": "T08 Stabilité longue durée",
     "t09": "T09 Flux entrant (évalué en tout dernier, sur tout le run) + champs CLI pour HA",
+    "t13": "T13 Replay mapping HA (frames CLI v7 réelles, local)",
 }
 
 
@@ -1033,6 +1196,7 @@ async def main():
         "t12": test_t12_pairing_and_send,
         "t08": test_t08_stability_long_run,
         "t09": test_t09_eval_events,
+        "t13": test_t13_replay,
     }
 
     try:

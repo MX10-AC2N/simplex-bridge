@@ -1,24 +1,25 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>simplex-bridge</Name>
-  <!-- Pinned to the v1.3.1 release rather than :latest. Floating :latest
+  <!-- Pinned to the v1.4.0 release rather than :latest. Floating :latest
        makes Unraid's Update button pull whatever main currently is, so a
        user can silently jump versions (including back to a build with a
        broken cap_drop set). A tag is used rather than a @sha256: digest
        because the Unraid template schema does not reliably round-trip a
-       digest through its Repository field; v1.3.1 is immutable in git, and
-       the compose file in this repo pins the exact digest for anyone who
-       wants byte-level pinning. Bump this tag when upgrading, and verify
-       with:
-         docker buildx imagetools inspect ghcr.io/libre-7/simplex-bridge:v1.3.1 -->
-  <Repository>ghcr.io/libre-7/simplex-bridge:v1.3.1</Repository>
+       digest through its Repository field; v1.4.0 is immutable in git.
+       docker-compose.yml in this repo currently pins the same tag (not yet
+       a digest: v1.4.0 has to be built and published by CI before its real
+       digest can be read back and pinned — see CHANGELOG.md). Bump this
+       tag when upgrading, and verify with:
+         docker buildx imagetools inspect ghcr.io/mx10-ac2n/simplex-bridge:v1.4.0 -->
+  <Repository>ghcr.io/mx10-ac2n/simplex-bridge:v1.4.0</Repository>
   <Registry>https://ghcr.io</Registry>
   <Network>host</Network>
   <MyIP/>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/libre-7/simplex-bridge/issues</Support>
-  <Project>https://github.com/libre-7/simplex-bridge</Project>
+  <Support>https://github.com/MX10-AC2N/simplex-bridge/issues</Support>
+  <Project>https://github.com/MX10-AC2N/simplex-bridge</Project>
   <Overview>SimpleX Chat bot daemon — bridge for Hermes Agent and messaging bots</Overview>
   <Description>
     SimpleX Chat is a fully private, decentralised messaging network that
@@ -45,11 +46,11 @@
     changes needed — enable via SIMPLEX_WS_URL env var).
   </Description>
   <Category>Messaging</Category>
-  <TemplateURL>https://raw.githubusercontent.com/libre-7/simplex-bridge/main/templates/simplex-bridge.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/libre-7/simplex-bridge/main/icons/simplex.png</Icon>
-  <Screenshot>https://raw.githubusercontent.com/libre-7/simplex-bridge/main/icons/simplex.png</Screenshot>
+  <TemplateURL>https://raw.githubusercontent.com/MX10-AC2N/simplex-bridge/main/templates/simplex-bridge.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/MX10-AC2N/simplex-bridge/main/icons/simplex.png</Icon>
+  <Screenshot>https://raw.githubusercontent.com/MX10-AC2N/simplex-bridge/main/icons/simplex.png</Screenshot>
   <ExtraSearchTerms>messaging private e2e encrypted decentralized chat simplex bot hermes ai agent SMP</ExtraSearchTerms>
-  <ReadMe>https://raw.githubusercontent.com/libre-7/simplex-bridge/main/README.md</ReadMe>
+  <ReadMe>https://raw.githubusercontent.com/MX10-AC2N/simplex-bridge/main/README.md</ReadMe>
   <ExtraParams></ExtraParams>
   <PostArgs></PostArgs>
 
@@ -86,6 +87,16 @@
   <LogMaxFile>3</LogMaxFile>
 
   <Changes>
+### 2026.11.23
+- F-03: template, Repository, Support, Project, TemplateURL, Icon, Screenshot
+  and ReadMe all pointed at libre-7/simplex-bridge (the upstream this project
+  forks from), so installing from this template actually pulled the
+  upstream's own image and pointed Unraid's update checks at the upstream
+  repo. All now point at MX10-AC2N/simplex-bridge.
+- F-14: first tagged fork release. Repository now pins v1.4.0 instead of a
+  nonexistent v1.3.1 (that tag was never cut in this fork — it was copied
+  from upstream's own template unchanged).
+
 ### 2026.10.03
 - Template now pins v1.3.1 instead of floating :latest, so Update cannot silently jump versions. Bump the Repository tag when upgrading.
 - Startup readiness checks now match the exact port. Previously a service on a port merely CONTAINING 5225 (e.g. 15225) could satisfy the check and report the API ready while the daemon was dead — reachable under host networking, where the container sees the whole host's listening sockets.

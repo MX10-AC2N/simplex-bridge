@@ -198,6 +198,22 @@ else
     skip_test "tests/test-port-gate.sh not found"
 fi
 
+if [[ -f tests/test-port-preflight.sh ]]; then
+    run_test \
+        "Host-listener preflight" \
+        bash tests/test-port-preflight.sh
+else
+    skip_test "tests/test-port-preflight.sh not found"
+fi
+
+if [[ -f tests/test-files-dir.sh ]]; then
+    run_test \
+        "SIMPLEX_FILES_DIR validation/chown" \
+        bash tests/test-files-dir.sh
+else
+    skip_test "tests/test-files-dir.sh not found"
+fi
+
 # --------------------------------------------------
 # 8. Installer regression
 # --------------------------------------------------

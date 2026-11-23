@@ -12,6 +12,9 @@ compose = (ROOT / "docker-compose.yml").read_text()
 workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text()
 entrypoint = (ROOT / "entrypoint.sh").read_text()
 changelog = (ROOT / "CHANGELOG.md").read_text()
+dockerfile = (ROOT / "Dockerfile").read_text()
+ca_profile = (ROOT / "ca_profile.xml").read_text()
+unraid_template = (ROOT / "templates" / "simplex-bridge.xml").read_text()
 workflow_dir = ROOT / ".github" / "workflows"
 all_workflows = {p: p.read_text() for p in sorted(workflow_dir.glob("*.yml"))}
 
@@ -43,6 +46,16 @@ check(
 check(
     "SIMPLEX_DNS_CHECK_HOST" in readme,
     "README documents DNS hostname configuration"
+)
+
+check(
+    "SIMPLEX_FILES_DIR" in entrypoint and "--files-folder" in entrypoint,
+    "Entrypoint supports SIMPLEX_FILES_DIR (--files-folder)"
+)
+
+check(
+    "SIMPLEX_FILES_DIR" in readme,
+    "README documents SIMPLEX_FILES_DIR"
 )
 
 check(
@@ -96,6 +109,28 @@ for path, text in all_workflows.items():
         not floating_action.search(text),
         f"{path.name}: no mutable @vN action references remain (F-05)"
     )
+
+# ── F-03: the Unraid template, CA profile and OCI labels must point at the
+# fork, not the upstream it was copied from. A blanket substring search would
+# false-positive on the <Changes> entry that DESCRIBES this bug by name, so
+# strip that block first and check only the live reference fields. ──
+template_live = re.sub(r"<Changes>.*?</Changes>", "", unraid_template, flags=re.S)
+check(
+    "libre-7" not in template_live,
+    "Unraid template no longer references libre-7 outside its changelog (F-03)"
+)
+check(
+    "libre-7" not in ca_profile,
+    "ca_profile.xml does not reference libre-7 (F-03)"
+)
+check(
+    "libre-7" not in dockerfile,
+    "Dockerfile OCI labels do not reference libre-7 (F-03)"
+)
+check(
+    "ghcr.io/mx10-ac2n/simplex-bridge" in unraid_template,
+    "Unraid template Repository points at the fork's own GHCR image (F-03)"
+)
 
 if errors:
     print(f"\n{len(errors)} check(s) failed.")

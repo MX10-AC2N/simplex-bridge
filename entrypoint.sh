@@ -10,6 +10,10 @@ DB_FILE="${DB_PREFIX}_chat.db"
 PUID="${PUID:-99}"
 PGID="${PGID:-100}"
 
+# FIX: défaut explicite — sans lui, un conteneur démarré sans cette variable
+# passe `--create-bot-display-name ""` et crée un profil sans nom affichable.
+SIMPLEX_DISPLAY_NAME="${SIMPLEX_DISPLAY_NAME:-SimpleX Bridge}"
+
 echo "[entrypoint] Using PUID=$PUID PGID=$PGID"
 
 # Validate numeric IDs.
@@ -213,20 +217,10 @@ if [ -n "${TZ:-}" ] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
     echo "$TZ" > /etc/timezone
 fi
 
-# ── Fix data directory ownership ───────────────────────────────────
-# Avoid a recursive walk when the top directory already has the
-# requested owner.
-
-if [ "$(stat -c '%u:%g' "$DATA_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
-    echo "[entrypoint] Fixing ownership of $DATA_DIR..."
-    chown -R "$PUID:$PGID" "$DATA_DIR"
-else
-    echo "[entrypoint] $DATA_DIR already owned by $PUID:$PGID — skipping chown"
-fi
-
 # ── Incoming files directory ───────────────────────────────────────
-# Keep received attachments in a dedicated volume so Home Assistant can
-# mount that volume read-only without gaining access to the SimpleX DB/keys.
+# Create this BEFORE the chown below: cap_drop:ALL removes
+# CAP_DAC_OVERRIDE, so once /data is chowned to PUID:PGID, root
+# can no longer mkdir inside it.
 SIMPLEX_FILES_DIR="${SIMPLEX_FILES_DIR:-$DATA_DIR/received_files}"
 case "$SIMPLEX_FILES_DIR" in
     /*) ;;
@@ -237,9 +231,43 @@ if [ "$SIMPLEX_FILES_DIR" = "/" ]; then
     exit 1
 fi
 mkdir -p "$SIMPLEX_FILES_DIR"
-if [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
-    chown -R "$PUID:$PGID" "$SIMPLEX_FILES_DIR"
+
+# FIX — Lisibilité des fichiers reçus par Home Assistant ─────────────
+# HA monte ce volume dans un conteneur séparé qui ne partage ni UID ni GID
+# avec le pont : chaque fichier créé par le démon PENDANT l'exécution doit
+# naître lisible par tous, sinon l'intégration ne peut pas servir les pièces
+# jointes (simplex/media/<name> → 404) et le symptôme est intermittent
+# selon l'image. Trois étages de défense :
+#   1. chmod 0755 du dossier ICI, par root, AVANT le chown : avec
+#      cap_drop:ALL, root n'a ni CAP_DAC_OVERRIDE ni CAP_FOWNER — une fois
+#      le dossier reowné à PUID:PGID, root ne pourrait plus le chmoder ;
+#   2. (après le chown, voir plus bas) rattrapage récursif exécuté VIA GOSU :
+#      le démon est propriétaire des fichiers des runs précédents, il peut
+#      donc les chmoder sans capability — root, lui, ne le pourrait plus ;
+#   3. umask 0022 : hérité par le démon lancé via gosu → tout nouveau
+#      fichier naît en 0644 (et les dossiers en 0755), quel que soit
+#      l'umask de l'image de base.
+# Limite connue : si le volume est bind-mounté depuis l'hôte avec des
+# permissions hôte restrictives, rien ne peut passer outre côté conteneur.
+chmod 0755 "$SIMPLEX_FILES_DIR" 2>/dev/null || true
+
+# ── Fix data directory ownership ───────────────────────────────────
+if [ "$(stat -c '%u:%g' "$DATA_DIR" 2>/dev/null)" != "$PUID:$PGID" ] \
+   || [ "$(stat -c '%u:%g' "$SIMPLEX_FILES_DIR" 2>/dev/null)" != "$PUID:$PGID" ]; then
+    echo "[entrypoint] Fixing ownership of $DATA_DIR..."
+    chown -R "$PUID:$PGID" "$DATA_DIR"
+else
+    echo "[entrypoint] $DATA_DIR already owned by $PUID:$PGID — skipping chown"
 fi
+
+# FIX (suite) — rattrapage des fichiers créés par un run antérieur avec un
+# umask restrictif (volume persistant). Exécuté en tant que démon (owner),
+# donc sans besoin de capability. X ne rend exécutable que ce qui l'était
+# déjà : aucun risque sur les données.
+gosu "$PUID:$PGID" chmod -R a+rX "$SIMPLEX_FILES_DIR" 2>/dev/null || true
+
+# FIX (suite) — umask hérité par le démon au lancement gosu plus bas.
+umask 0022
 
 # ── Build extra flags ──────────────────────────────────────────────
 FLAGS=(-d "$DATA_DIR/simplex" -p 5225 --files-folder "$SIMPLEX_FILES_DIR")

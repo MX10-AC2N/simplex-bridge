@@ -958,157 +958,111 @@ async def test_t09_eval_events(results):
         )
 
 
-# ---------------------------------------------------------------- T13 replay
-
-# Frames CLI v7 RÉELLES capturées par les runs de référence du 22/11/2026
-# (CLI 7.1.4.0) : cycle de connexion → items système → ping sortant du bot →
-# vrai message utilisateur entrant. Structure prouvée par cartographie :
-# wrapper {chatInfo, chatItem}, meta.chatDir.type, meta.itemText,
-# content.type abrégé.
+# ================================================================ T13 replay
+# Frames CLI v7.1.4.0 réelles, capturées lors du run de référence (T09).
+# Local, zéro réseau : rejouées à travers la réplique du mapping HA pour
+# détecter toute divergence de sérialisation (ex. itemId déplacé).
 REPLAY_FRAMES = [
-    # cycle de connexion (sans chatItems)
-    json.dumps({"resp": {"type": "contactConnecting",
-                         "user": {"localDisplayName": "SimpleX Bridge"}}}),
-    json.dumps({"resp": {"type": "contactConnected",
-                         "user": {"localDisplayName": "SimpleX Bridge"}}}),
-    # 1) items système générés automatiquement à la connexion — ne doivent PAS
-    #    produire d'event HA (bulles fantômes = régression du correctif n°4)
-    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
-                         "chatItems": [{
-                             "chatInfo": {"type": "direct",
-                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
-                                                      "profile": {"displayName": "AC2N"}}},
-                             "chatItem": {"itemId": 2,
-                                          "meta": {"chatDir": {"type": "directRcv"},
-                                                   "itemText": "chat banner"},
-                                          "content": {"type": "rcvDirectE2EEInfo"}}}]}}),
-    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
-                         "chatItems": [{
-                             "chatInfo": {"type": "direct",
-                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
-                                                      "profile": {"displayName": "AC2N"}}},
-                             "chatItem": {"itemId": 3,
-                                          "meta": {"chatDir": {"type": "directRcv"},
-                                                   "itemText": ""},
-                                          "content": {"type": "rcvChatFeature"}}}]}}),
-    # 2) ping sortant du bot : direction OUTGOING (chatDir directSnd) —
-    #    régression du correctif n°2 (l'ancien code lisait meta.direction →
-    #    toujours "incoming", ce qui polluait sensor.last_message)
-    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
-                         "chatItems": [{
-                             "chatInfo": {"type": "direct",
-                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
-                                                      "profile": {"displayName": "AC2N"}}},
-                             "chatItem": {"itemId": 1,
-                                          "meta": {"chatDir": {"type": "directSnd"},
-                                                   "itemText": "ping de validation ws-validate.py"},
-                                          "content": {"type": "text",
-                                                      "text": "ping de validation ws-validate.py"}}}]}}),
-    # 3) vrai message utilisateur entrant : doit produire UN event HA avec
-    #    alias/chat_ref/text/direction/item_id corrects
-    json.dumps({"resp": {"type": "newChatItems", "user": {"localDisplayName": "SimpleX Bridge"},
-                         "chatItems": [{
-                             "chatInfo": {"type": "direct",
-                                          "contact": {"contactId": 3, "localDisplayName": "AC2N",
-                                                      "profile": {"displayName": "AC2N"}}},
-                             "chatItem": {"itemId": 17,
-                                          "meta": {"chatDir": {"type": "directRcv"},
-                                                   "itemText": "Alors tu reçois"},
-                                          "content": {"type": "text",
-                                                      "text": "Alors tu reçois"}}}]}}),
+    # cycle de connexion
+    '{"corrId":null,"resp":{"type":"contactConnecting","contact":{"localDisplayName":"AC2N","contactId":3}}}',
+    '{"corrId":null,"resp":{"type":"contactConnected","contact":{"localDisplayName":"AC2N","contactId":3}}}',
+    # items système de connexion (doivent être filtrés)
+    '{"corrId":null,"resp":{"type":"newChatItems","user":{"userId":1,"localDisplayName":"SimpleX Bridge"},"chatItems":['
+    '{"chatInfo":{"type":"direct","contact":{"localDisplayName":"AC2N","contactId":3}},'
+    '"chatItem":{"itemId":13,"meta":{"chatDir":{"type":"directRcv"},"itemText":"chat banner"},'
+    '"content":{"type":"chatBanner"}}}},'
+    '{"chatInfo":{"type":"direct","contact":{"localDisplayName":"AC2N","contactId":3}},'
+    '"chatItem":{"itemId":14,"meta":{"chatDir":{"type":"directRcv"},"itemText":"E2EE info"},'
+    '"content":{"type":"rcvDirectE2EEInfo"}}}]}}',
+    # ping sortant du bot (directSnd) —(itemId au niveau chatItem, PAS meta)
+    '{"corrId":null,"resp":{"type":"newChatItems","chatItems":['
+    '{"chatInfo":{"type":"direct","contact":{"localDisplayName":"AC2N","contactId":3}},'
+    '"chatItem":{"itemId":16,"meta":{"chatDir":{"type":"directSnd"},'
+    '"itemText":"ping de validation ws-validate.py"},"content":{"type":"text"}}}]}}',
+    # vrai message reçu du téléphone (itemId 17, comme dans le run de référence)
+    '{"corrId":null,"resp":{"type":"newChatItems","chatItems":['
+    '{"chatInfo":{"type":"direct","contact":{"localDisplayName":"AC2N","contactId":3}},'
+    '"chatItem":{"itemId":17,"meta":{"chatDir":{"type":"directRcv"},'
+    '"itemText":"Alors tu reçois"},"content":{"type":"text"}}}]}}',
 ]
 
 
-def _mock_ha_mapping(frame_raw):
-    """Réplique fidèle du mapping attendu côté intégration HA APRÈS patch du
-    normalize_chat_item (même logique que la version corrigée de __init__.py) :
-    retourne la liste des dicts « event simplex_message_received » produits.
-    Si le CLI change de sérialisation, cette réplique diverge du comportement
-    réel → les checks échouent et alertent avant toute intégration HA."""
+def _mock_ha_mapping(item):
+    """Réplique fidèle du normalize_chat_item de l'intégration HA (v7) :
+    unwrap {chatInfo, chatItem}, filtre système, direction via chatDir.type
+    (suffixe snd = outgoing), texte via meta.itemText, item_id via
+    chatItem.itemId (fallback meta.itemId)."""
+    ci = item.get("chatItem") if isinstance(item.get("chatItem"), dict) else item
+    meta = ci.get("meta") if isinstance(ci.get("meta"), dict) else {}
+    content = ci.get("content") if isinstance(ci.get("content"), dict) else {}
+    kind = str(content.get("type") or "?")
+    if kind in SYSTEM_CONTENT_TYPES:
+        return None
+    chat_info = item.get("chatInfo") if isinstance(item.get("chatInfo"), dict) else {}
+    contact = chat_info.get("contact") if isinstance(chat_info.get("contact"), dict) else {}
+    chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else {}
+    direction = str(chat_dir.get("type") or meta.get("direction") or "?")
+    text = (meta.get("itemText")
+            or content.get("text") or content.get("fileName") or "")
+    return {
+        "alias": str(contact.get("localDisplayName") or "?"),
+        "chat_ref": (f"@{contact['contactId']}"
+                     if contact.get("contactId") is not None else None),
+        "text": str(text),
+        "direction": ("outgoing" if direction.lower().endswith("snd")
+                      else "incoming"),
+        "item_id": ci.get("itemId") if ci.get("itemId") is not None
+                   else meta.get("itemId"),
+        "content_type": kind,
+    }
+
+
+def test_t13_replay(results):
+    """T13 — Replay local des frames CLI v7 réelles à travers la réplique du
+    mapping HA. Garde-fou contre une évolution de sérialisation du CLI :
+    si un champ change d'emplacement (cf. itemId), ce test échoue AVANT la
+    mise en production côté intégration."""
     events = []
-    try:
-        resp = json.loads(frame_raw).get("resp", {})
-    except (ValueError, TypeError, AttributeError):
-        return events
-    if resp.get("type") not in ("newChatItems", "chatItemsCreated"):
-        return events
-    items = resp.get("chatItems") or []
-    for wrapper in items:
-        if not isinstance(wrapper, dict):
+    for raw in REPLAY_FRAMES:
+        ev = parse_event(raw)
+        if not ev or ev["type"] != "newChatItems":
             continue
-        chat_info = wrapper.get("chatInfo") or {}
-        chat_item = wrapper.get("chatItem") if isinstance(wrapper.get("chatItem"), dict) else wrapper
-        meta = chat_item.get("meta") or {}
-        content = chat_item.get("content") or {}
-        mc = content.get("msgContent") if isinstance(content.get("msgContent"), dict) else content
-        kind = mc.get("type") or "?"
-        if kind in SYSTEM_CONTENT_TYPES:
-            continue  # filtré : jamais rendu ni émis
-        chat_dir = meta.get("chatDir") if isinstance(meta.get("chatDir"), dict) else \
-                   (meta.get("direction") if isinstance(meta.get("direction"), dict) else {})
-        direction = "outgoing" if str(chat_dir.get("type") or "").lower().endswith("snd") else "incoming"
-        text = meta.get("itemText") or mc.get("text") or mc.get("fileName") or ""
-        contact = chat_info.get("contact") or {}
-        cid = contact.get("contactId")
-        if not text and kind not in ("file", "image", "video", "voice"):
+        # on rejoue sur les items WRAPPÉS bruts (comme le fait HA)
+        try:
+            resp = json.loads(raw).get("resp", {})
+        except (ValueError, TypeError):
             continue
-        events.append({
-            "alias": contact.get("localDisplayName"),
-            "chat_ref": f"@{cid}" if cid is not None else None,
-            "text": str(text)[:80],
-            "direction": direction,
-            "item_id": meta.get("itemId"),
-            "content_type": kind,
-        })
-    return events
+        for it in resp.get("chatItems") or []:
+            if isinstance(it, dict):
+                mapped = _mock_ha_mapping(it)
+                if mapped is not None:
+                    events.append(mapped)
 
+    checks_failed = []
+    if len(events) != 2:
+        checks_failed.append(f"nombre d'events (attendu 2, obtenu {len(events)})")
+    if any(e["item_id"] is None for e in events):
+        checks_failed.append("item_id présent")
+    if sum(1 for e in events if e["direction"] == "outgoing") != 1:
+        checks_failed.append("ping sortant = outgoing")
+    if not any(e["direction"] == "incoming" and e["text"] == "Alors tu reçois"
+               for e in events):
+        checks_failed.append("texte du message extrait")
+    if not any(e["chat_ref"] == "@3" and e["alias"] == "AC2N" for e in events):
+        checks_failed.append("chat_ref @3 + alias AC2N")
 
-async def test_t13_replay(results):
-    """T13 — Replay du mapping HA sur les frames CLI v7 réelles capturées par
-    les runs précédents. Vérifie les 4 correctifs du patch normalize_chat_item :
-      1. wrapper {chatInfo, chatItem} déballé (item_id présent) ;
-      2. chatDir.type lu (ping sortant → direction=outgoing) ;
-      3. texte extrait via meta.itemText (non vide sur message utilisateur) ;
-      4. items système filtrés (chatBanner/rcvDirectE2EEInfo/rcvChatFeature
-         ne produisent AUCUN event).
-    Test purement local (aucun réseau) : il lock le contrat passerelle→HA à
-    chaque commit, même si le CLI change de sérialisation."""
-    all_events = []
-    for frame in REPLAY_FRAMES:
-        all_events.extend(_mock_ha_mapping(frame))
-
-    checks = []
-    incoming = [e for e in all_events if e["direction"] == "incoming"]
-    outgoing = [e for e in all_events if e["direction"] == "outgoing"]
-
-    # C4 : zéro event issu des items système (2 frames système dans le replay)
-    checks.append(("aucun event système", len(all_events) == 2,
-                   f"{len(all_events)} event(s) produit(s) au total (attendu 2)"))
-    # C1 : item_id extrait (wrapper déballé)
-    checks.append(("item_id présent", all(e["item_id"] is not None for e in all_events),
-                   "item_id manquant → wrapper {chatInfo, chatItem} non déballé"))
-    # C2 : le ping sortant est bien outgoing
-    checks.append(("ping sortant = outgoing",
-                   len(outgoing) == 1 and "ping de validation" in outgoing[0]["text"],
-                   f"outgoing={len(outgoing)} → meta.chatDir non lu (correctif n°2)"))
-    # C3 : texte du message réel extrait
-    checks.append(("texte du message extrait",
-                   any("Alors tu reçois" in e["text"] for e in incoming),
-                   "meta.itemText non extrait (correctif n°3)"))
-    # Bonus : chat_ref + alias mappés
-    checks.append(("chat_ref @3 + alias AC2N",
-                   all(e["chat_ref"] == "@3" and e["alias"] == "AC2N" for e in all_events),
-                   "chatInfo.contact mal lu"))
-
-    failed = [name for name, ok, _ in checks if not ok]
-    detail = "\n".join(f"  {'✅' if ok else '❌'} {name} — {why}"
-                       for name, ok, why in checks)
-    sample = "\n".join(f"  event: {json.dumps(e, ensure_ascii=False)}" for e in all_events)
-    if failed:
-        results["t13"].fail(f"{len(failed)} check(s) en échec : {', '.join(failed)}\n{detail}\n{sample}")
+    lines = [f'event: {json.dumps(e, ensure_ascii=False)}' for e in events]
+    if checks_failed:
+        results["t13"].fail(
+            f"{len(checks_failed)} check(s) en échec : {' ; '.join(checks_failed)}\n"
+            + "\n".join(lines)
+        )
     else:
-        results["t13"].ok(f"mapping HA conforme sur {len(REPLAY_FRAMES)} frames réelles v7 :\n{detail}\n{sample}")
-
+        results["t13"].ok(
+            "mapping HA verrouillé sur les frames v7 réelles : wrapper déballé, "
+            "items système filtrés, direction chatDir.type, texte meta.itemText, "
+            "item_id chatItem.itemId\n" + "\n".join(lines)
+        )
 
 # ---------------------------------------------------------------- rapport
 

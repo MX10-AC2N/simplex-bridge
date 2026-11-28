@@ -132,6 +132,22 @@ check(
     "Unraid template Repository points at the fork's own GHCR image (F-03)"
 )
 
+# ── F-14: the compose file must pin the published image by digest, and must
+# not carry `build:` (a @sha256: reference cannot name a local build, so it
+# lives in docker-compose.build.yml) ──
+check(
+    re.search(r"^\s*image:\s*ghcr\.io/mx10-ac2n/simplex-bridge@sha256:[0-9a-f]{64}\s*$", compose, re.M),
+    "Compose pins the published image by sha256 digest (F-14)"
+)
+check(
+    not re.search(r"^\s*build:", compose, re.M),
+    "Compose has no build: (digest image cannot name a local build) (F-14)"
+)
+check(
+    (ROOT / "docker-compose.build.yml").is_file(),
+    "docker-compose.build.yml provides the local-build override (F-14)"
+)
+
 if errors:
     print(f"\n{len(errors)} check(s) failed.")
     sys.exit(1)

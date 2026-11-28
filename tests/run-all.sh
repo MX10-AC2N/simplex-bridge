@@ -116,6 +116,7 @@ if python3 -c "import yaml" >/dev/null 2>&1; then
 
     for file in \
         docker-compose.yml \
+        docker-compose.build.yml \
         compose.yml \
         .github/workflows/docker-publish.yml \
         .github/workflows/base-refresh.yml
@@ -204,6 +205,14 @@ if [[ -f tests/test-port-preflight.sh ]]; then
         bash tests/test-port-preflight.sh
 else
     skip_test "tests/test-port-preflight.sh not found"
+fi
+
+if [[ -f tests/test-files-dir-order.sh ]]; then
+    run_test \
+        "SIMPLEX_FILES_DIR created before /data chown" \
+        bash tests/test-files-dir-order.sh
+else
+    skip_test "tests/test-files-dir-order.sh not found"
 fi
 
 if [[ -f tests/test-files-dir.sh ]]; then

@@ -20,6 +20,11 @@ jobs:
   ws-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # docker-compose.yml pins the published image by digest and has no
+      # build:, so without this override the job would test the OLD release
+      # instead of the code under review. Also applies to logs/down below.
+      COMPOSE_FILE: docker-compose.yml:docker-compose.build.yml
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

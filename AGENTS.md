@@ -138,3 +138,7 @@ pytest tests/
 npm --prefix frontend/messenger ci && npm --prefix frontend/messenger run build
 git diff --exit-code custom_components/simplex/cards/
 ```
+
+### Updating `AGENTS.md`
+- **Do not** rewrite tasks, alter architectural invariants, or reorder priorities on your own.
+- **Only** append concise clarifications or edge cases to `AGENTS.md` when you hit real ambiguities during execution (for example: an exact file path, an undocumented CLI/HA quirk, or a test constraint not covered above), and note why in your PR/commit summary.

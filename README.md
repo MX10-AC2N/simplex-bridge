@@ -40,7 +40,7 @@ cd simplex-bridge
 Build and start:
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 View logs:
@@ -61,21 +61,23 @@ optional shared outbox is `simplex-outbox`. Back up `simplex-data` regularly.
 
 ## Using the Published Image
 
-To use the image published by this fork instead of building locally:
+`docker-compose.yml` runs the image published by this fork, pinned by digest
+(v1.5.1), so no build is involved:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-Image:
+To upgrade, read the new release's digest and replace the one in
+`docker-compose.yml`:
 
-```text
-ghcr.io/mx10-ac2n/simplex-bridge:latest
+```bash
+docker buildx imagetools inspect ghcr.io/mx10-ac2n/simplex-bridge:<tag>
 ```
 
-For production deployments, prefer a specific commit or version tag instead
-of `latest`.
+Use the top-level `Digest:` line, not a per-platform one. Avoid `latest`: it
+moves with `main`.
 
 ## Configuration
 
@@ -328,10 +330,10 @@ Build directly:
 docker build -t simplex-bridge:local .
 ```
 
-Or use Docker Compose:
+Or use Docker Compose with the build override:
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ## Tests

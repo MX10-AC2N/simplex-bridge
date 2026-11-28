@@ -1,0 +1,11 @@
+# Local-build override: merge it on top of docker-compose.yml.
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# docker-compose.yml pins the published image by digest and has no `build:`
+# (a @sha256: reference cannot name a local build), so the build context and
+# a valid local tag live here.
+services:
+  simplex-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: simplex-bridge:local

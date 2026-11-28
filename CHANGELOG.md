@@ -5,6 +5,17 @@ All notable changes to MX10-AC2N SimpleX Bridge are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **F-14** (completed): `docker-compose.yml` now pins the published image by
+  `@sha256:` digest (the v1.5.1 multi-arch index) instead of a floating tag.
+  Because a digest cannot name a local build, `build:` moved to
+  `docker-compose.build.yml`; build locally with
+  `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
+  `ws-validation.yml` sets `COMPOSE_FILE` to that pair so it keeps testing the
+  code under review rather than the pinned release. The Unraid template pins
+  the `v1.5.1` tag (its schema does not round-trip digests).
+
 ## [v1.4.0] - 2026-11-23
 
 ### Fixed
@@ -97,21 +108,6 @@ All notable changes to MX10-AC2N SimpleX Bridge are documented here.
 - Updated README deployment instructions.
 - Updated image registry references to GHCR.
 - Preserved Docker capability restrictions and no-new-privileges.
-
-### Pending (F-14 follow-up)
-
-`docker-compose.yml` and the Unraid template currently pin the `v1.4.0`
-**tag**, not yet a `@sha256:` **digest**. The real digest cannot be read
-back before CI has actually built and published this tag. Once the
-`v1.4.0` tag is pushed and `docker-publish.yml` has run:
-
-```bash
-docker buildx imagetools inspect ghcr.io/mx10-ac2n/simplex-bridge:v1.4.0
-```
-
-Replace `image: ghcr.io/mx10-ac2n/simplex-bridge:v1.4.0` in
-`docker-compose.yml` with `ghcr.io/mx10-ac2n/simplex-bridge@sha256:<digest>`
-and update the matching comment in `templates/simplex-bridge.xml`.
 
 ## Upstream
 
